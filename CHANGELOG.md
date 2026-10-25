@@ -5,6 +5,14 @@ without a code change (goldens, layout, input), newest first, with the rev that 
 
 ## dev
 
+- **Traces say what animated.** Each `--trace` frame now carries `quality.why` (what kept the
+  frame animating: tracks, growth, scroll, reveal, loop, text-flight, …) and `tk`, the motion
+  tracks it sampled as `[element, property, active]`. New `--trace-all` traces unkeyed elements
+  too, named by path. `scripts/motion-audit/` records the example apps with it and flags snaps,
+  pops, neighbour jumps, overshoot, motion that never settles and animation nobody can see.
+  Things apps can notice: trace files are larger (the new fields, and every element with
+  `--trace-all`); element rows are unchanged.
+
 - **rune-fx fills.** `Fx::fill(params)` paints a node's shape, or with `.border(w)` a band inside
   its edge: liquid metal (chrome, gold, rose gold, gunmetal; also as a tube border), mesh
   gradient, dither (Bayer 2×2/4×4/8×8, blue noise, white noise; of a ramp, noise, the backdrop or

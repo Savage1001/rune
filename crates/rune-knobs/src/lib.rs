@@ -243,10 +243,14 @@ pub struct Knobs {
     /// [`show`]: Knobs::show
     pub folded: BTreeSet<String>,
     pub unfolded: BTreeSet<String>,
-    /// What has been typed to filter the side panel.
+    /// What has been typed to filter the side panel: the filter field's text, kept in step with
+    /// it on every edit. Set it with [`Knobs::set_query`] so the field follows.
     pub query: String,
-    /// Typing goes into the filter: `/` (or a click on it) starts, Esc or Return stops.
+    /// The filter field is editing: `/` (or a click on it) starts, Esc or Return stops. While
+    /// it does, the field owns the keys it edits with.
     pub filtering: bool,
+    /// The filter field's model: caret, selection, undo. `query` mirrors its text.
+    edit: rune::TextEdit,
     /// The page the side panel's Tabs layout shows, once one is picked.
     pub tab: Option<String>,
     /// The side panel's keyboard row.
@@ -350,12 +354,52 @@ impl Knobs {
         self.hot = Some(name.to_owned());
         self.hot_opt = option.map(|j| (name.to_owned(), j));
     }
+    /// Sets the filter's text, in the field and in `query`.
+    pub fn set_query(&mut self, q: &str) {
+        self.query = q.to_owned();
+        self.sync_edit();
+    }
+    /// Brings the field's text to `query`, if the app changed `query` itself.
+    pub(crate) fn sync_edit(&mut self) {
+        if self.edit.text != self.query {
+            self.edit.replace_text(self.query.clone());
+        }
+    }
+    /// Starts filtering, as `/` does: the field takes focus with its text selected, so typing
+    /// replaces it.
+    pub fn filter(&mut self, query: &str) {
+        self.set_query(query);
+        self.start_filter();
+    }
+    pub(crate) fn start_filter(&mut self) {
+        self.sync_edit();
+        self.filtering = true;
+        self.edit.focused = true;
+        self.edit.set_selection(0, self.edit.text.len());
+    }
+    /// Stops filtering; focus goes back to the panel.
+    pub(crate) fn stop_filter(&mut self) {
+        self.filtering = false;
+        self.edit.focused = false;
+    }
+    /// The field's model, for [`rune::El::on_edit`].
+    pub(crate) fn edit_mut(&mut self) -> &mut rune::TextEdit {
+        &mut self.edit
+    }
+    /// The field's model as the view draws it.
+    pub(crate) fn edit(&self) -> &rune::TextEdit {
+        &self.edit
+    }
+    /// The field changed: `query` follows.
+    pub(crate) fn edited(&mut self) {
+        self.query = self.edit.text.clone();
+    }
     pub fn close(&mut self) {
         self.open = false;
         self.picking = false;
         self.hover = None;
         self.kbd = false;
-        self.filtering = false;
+        self.stop_filter();
         self.hot = None;
         self.hot_opt = None;
         self.drag = None;
@@ -378,7 +422,11 @@ impl Knobs {
     /// moves one option), Tab, ⇧Tab, `[` and `]` switch groups, Esc closes. True if taken.
     pub fn panel_key(&mut self, groups: &[Group], ev: &KeyEvent) -> bool {
         use rune::Key;
-        if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl {
+        // Focus left the filter field without the panel hearing of it.
+        if self.filtering && !self.edit.focused {
+            self.filtering = false;
+        }
+        if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl || self.filtering {
             return false;
         }
         if ev.key == Key::Escape {

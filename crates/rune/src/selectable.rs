@@ -141,6 +141,16 @@ pub(super) fn push_selection(out: &mut Vec<Instance>, layout: &Layout<Ink>, a: u
     }
 }
 
+/// A text field's selection: one layout, so no runs to join, and a field's own fill behind it
+/// is the field, not a chip the highlight should stretch to.
+pub(super) fn push_field_selection(out: &mut Vec<Instance>, layout: &Layout<Ink>, a: usize, b: usize, origin: [f32; 2], k: f32,
+    fill: [f32; 4], s: f32, clip: [f32; 4], fade: [f32; 4]) {
+    for (bb, _) in crate::text::range_boxes(layout, a, b, true) {
+        let rect = [origin[0] + bb.x0 as f32 * k, origin[1] + bb.y0 as f32 * k, (bb.x1 - bb.x0) as f32 * k, (bb.y1 - bb.y0) as f32 * k];
+        out.push(rect_inst(rect, fill, 2.0 * s * k, clip, fade));
+    }
+}
+
 /// Words flowed as separate texts each draw their own highlight. One that starts where a recent
 /// one on the same line ended (or after the little gap a chip's icon and padding leave) joins
 /// it, so a run reads as one rect with no seams, as tall as the line's tallest text. When

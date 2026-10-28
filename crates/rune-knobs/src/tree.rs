@@ -1,8 +1,9 @@
 //! What the side panel lists, in what order and what's folded, and its keys. Groups filed
 //! under a page fold with it. The Tree layout starts with everything folded, a list of all the
 //! parts with a dot on what's on screen, until one is opened; the others open what's on screen. [`LAYOUT`] picks how they're laid out
-//! while comparing. ↑/↓ move a row, ← → fold and open a header or step a knob, typing
-//! filters, Esc clears the filter and then closes.
+//! while comparing. ↑/↓ move a row, ← → fold and open a header or step a knob, `/` starts the
+//! filter (a real text field: see [`Knobs::filter_key`] for the few keys the panel keeps while
+//! it edits), Esc stops filtering, then clears the filter, then closes.
 #![cfg_attr(not(feature = "panel"), allow(dead_code))]
 
 use std::collections::BTreeSet;
@@ -205,35 +206,25 @@ impl Knobs {
         if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl {
             return Did::Not;
         }
+        // Focus left the field without the panel hearing of it (a click elsewhere).
+        if self.filtering && !self.edit.focused {
+            self.filtering = false;
+        }
+        if self.filtering {
+            return self.filter_key(groups, plan, ev);
+        }
         let rows = rows(plan);
         let here = self.at.and_then(|n| rows.iter().position(|r| *r == n));
         let did = match &ev.key {
-            Key::Escape if self.filtering => {
-                self.filtering = false;
-                if rows.is_empty() {
-                    self.query.clear();
-                }
-                Did::Now
-            }
             Key::Escape if !self.query.is_empty() => {
-                self.query.clear();
+                self.set_query("");
                 Did::Now
             }
             Key::Escape => {
                 self.close();
                 return Did::Now;
             }
-            Key::Up | Key::Down if !rows.is_empty() => {
-                let down = ev.key == Key::Down;
-                let i = match here {
-                    Some(i) if down => (i + 1).min(rows.len() - 1),
-                    Some(i) => i.saturating_sub(1),
-                    None if down => 0,
-                    None => rows.len() - 1,
-                };
-                self.set_at(Some(rows[i]), groups);
-                Did::Now
-            }
+            Key::Up | Key::Down | Key::Tab => self.move_row(groups, plan, ev),
             Key::Left | Key::Right => {
                 let right = ev.key == Key::Right;
                 match self.at.filter(|_| here.is_some()) {
@@ -277,10 +268,6 @@ impl Knobs {
                     None => Did::Not,
                 }
             }
-            Key::Enter if self.filtering => {
-                self.filtering = false;
-                Did::Now
-            }
             Key::Enter => match self.at.filter(|_| here.is_some()) {
                 Some(Node::Group(g)) => {
                     let name = groups[g].name;
@@ -295,26 +282,19 @@ impl Knobs {
                 }
                 _ => Did::Not,
             },
-            Key::Tab => {
-                let heads: Vec<usize> = (0..rows.len()).filter(|&i| !matches!(rows[i], Node::Knob(..))).collect();
-                let at = here.unwrap_or(0);
-                let next = if ev.mods.shift { heads.iter().rev().find(|&&i| i < at).or(heads.last()) } else { heads.iter().find(|&&i| i > at).or(heads.first()) };
-                if let Some(&i) = next {
-                    self.set_at(Some(rows[i]), groups);
-                }
-                Did::Now
-            }
             Key::Backspace if !self.query.is_empty() => {
-                self.query.pop();
+                let mut q = self.query.clone();
+                q.pop();
+                self.set_query(&q);
                 self.refilter(groups, plan);
                 Did::Now
             }
-            Key::Text(t) if !self.filtering && t == "/" => {
-                self.filtering = true;
+            Key::Text(t) if t == "/" => {
+                self.start_filter();
                 Did::Now
             }
             // 1–9 pick the keyboard's choice's option.
-            Key::Text(t) if !self.filtering && t.len() == 1 && matches!(t.as_bytes()[0], b'1'..=b'9') => {
+            Key::Text(t) if t.len() == 1 && matches!(t.as_bytes()[0], b'1'..=b'9') => {
                 let n = (t.as_bytes()[0] - b'1') as usize;
                 match self.at.filter(|_| here.is_some()) {
                     Some(Node::Knob(g, i)) if n < groups[g].knobs[i].labels.len() => {
@@ -327,16 +307,11 @@ impl Knobs {
                     _ => Did::Now,
                 }
             }
-            Key::Text(t) if !self.filtering && (t == "[" || t == "]") && !plan.tabs.is_empty() => {
+            Key::Text(t) if (t == "[" || t == "]") && !plan.tabs.is_empty() => {
                 let i = plan.tab.and_then(|c| plan.tabs.iter().position(|(p, _)| *p == c)).unwrap_or(0) as i32;
                 let n = plan.tabs.len() as i32;
                 self.tab = Some(plan.tabs[(i + if t == "[" { -1 } else { 1 }).rem_euclid(n) as usize].0.to_owned());
                 self.at = None;
-                Did::Now
-            }
-            Key::Text(t) if self.filtering && !t.is_empty() && t.chars().all(|c| !c.is_control()) && !(self.query.is_empty() && t == " ") => {
-                self.query.push_str(t);
-                self.refilter(groups, plan);
                 Did::Now
             }
             _ => Did::Not,
@@ -347,8 +322,66 @@ impl Knobs {
         did
     }
 
+    /// The keys the panel keeps while the filter field edits (it hears every other key first
+    /// and owns ← →, digits, `[` `]`, `/`, Backspace and the ⌘ ⌥ chords): ↑ ↓ move the row so
+    /// a result is an arrow away, Tab moves between headers, Return stops filtering, and Esc
+    /// stops it too (the matches stay; Esc again clears them, and again closes).
+    pub(crate) fn filter_key(&mut self, groups: &[Group], plan: &Plan, ev: &KeyEvent) -> Did {
+        if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl {
+            return Did::Not;
+        }
+        let did = match &ev.key {
+            Key::Escape => {
+                self.stop_filter();
+                if rows(plan).is_empty() {
+                    self.set_query("");
+                }
+                Did::Now
+            }
+            Key::Enter => {
+                self.stop_filter();
+                Did::Now
+            }
+            Key::Up | Key::Down | Key::Tab => self.move_row(groups, plan, ev),
+            _ => Did::Not,
+        };
+        if did != Did::Not {
+            self.kbd = true;
+        }
+        did
+    }
+
+    /// ↑ ↓ walk the rows; Tab jumps between headers.
+    fn move_row(&mut self, groups: &[Group], plan: &Plan, ev: &KeyEvent) -> Did {
+        let rows = rows(plan);
+        let here = self.at.and_then(|n| rows.iter().position(|r| *r == n));
+        match &ev.key {
+            Key::Up | Key::Down if !rows.is_empty() => {
+                let down = ev.key == Key::Down;
+                let i = match here {
+                    Some(i) if down => (i + 1).min(rows.len() - 1),
+                    Some(i) => i.saturating_sub(1),
+                    None if down => 0,
+                    None => rows.len() - 1,
+                };
+                self.set_at(Some(rows[i]), groups);
+                Did::Now
+            }
+            Key::Tab => {
+                let heads: Vec<usize> = (0..rows.len()).filter(|&i| !matches!(rows[i], Node::Knob(..))).collect();
+                let at = here.unwrap_or(0);
+                let next = if ev.mods.shift { heads.iter().rev().find(|&&i| i < at).or(heads.last()) } else { heads.iter().find(|&&i| i > at).or(heads.first()) };
+                if let Some(&i) = next {
+                    self.set_at(Some(rows[i]), groups);
+                }
+                Did::Now
+            }
+            _ => Did::Not,
+        }
+    }
+
     /// After the filter changes, the keyboard stands on the first knob it shows.
-    fn refilter(&mut self, groups: &[Group], before: &Plan) {
+    pub(crate) fn refilter(&mut self, groups: &[Group], before: &Plan) {
         let now = plan(self, groups, before.seen.clone());
         let first = rows(&now).into_iter().find(|n| matches!(n, Node::Knob(..)));
         self.set_at(first, groups);

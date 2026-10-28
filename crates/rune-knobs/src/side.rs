@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use rune::{Cursor, Drag, El, Phase, ScrollSpec, Spring, SpringPair, TextStyle, Transition, Tx, col, el, row, spacer, text};
+use rune::{Cursor, Drag, El, Phase, ScrollSpec, Spring, SpringPair, TextStyle, Transition, Tx, col, edit_access, el, row, spacer, text, text_input};
 
 use crate::rows::{Ctx, LABEL, PAD, VALUE, presets};
 use crate::side_list::{list, tabs};
@@ -95,7 +95,7 @@ fn panel<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, lens: fn(&m
         Some(g) => top.child(presets(cx, &g)),
         None => top.child(text("Click a part of the window to tune it.").key("knobs-hint").font(LABEL).color(st.fg3).px(PAD).h(28.0)),
     };
-    top = top.child(filter(k, st, lens, &plan));
+    top = top.child(filter(k, groups, st, lens, &plan));
     if !plan.tabs.is_empty() && k.query.is_empty() {
         top = top.child(tabs(st, lens, &plan));
     }
@@ -115,16 +115,8 @@ fn panel<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, lens: fn(&m
             if !k.open {
                 return false;
             }
-            match k.tree_key(groups, &keys, ev) {
-                Did::Not => return false,
-                Did::Now if k.open => tx.instant(),
-                Did::Now => tx.motion(k.slide()),
-                Did::Fold => tx.motion(k.fold_spring()),
-            }
-            if let Some(n) = k.at() {
-                tx.scroll_into_view(node_key(n, groups));
-            }
-            true
+            let did = k.tree_key(groups, &keys, ev);
+            took(k, did, groups, tx)
         })
         // The pointer moving takes the highlight from the keyboard's row, so only one row is lit.
         .on_pointer_move_local(move |s: &mut S, _, tx: &mut Tx| {
@@ -142,31 +134,73 @@ fn panel<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, lens: fn(&m
         .child(about(k, groups, st))
 }
 
-/// What has been typed, or how to start typing.
-fn filter<S: 'static>(k: &Knobs, st: Style, lens: fn(&mut S) -> &mut Knobs, plan: &Plan) -> El {
+/// What a panel key did, shown: the motion it asks for and the keyboard's row in view. True if
+/// the key was taken.
+fn took(k: &mut Knobs, did: Did, groups: &[Group], tx: &mut Tx) -> bool {
+    match did {
+        Did::Not => return false,
+        Did::Now if k.open => tx.instant(),
+        Did::Now => tx.motion(k.slide()),
+        Did::Fold => tx.motion(k.fold_spring()),
+    }
+    if let Some(n) = k.at() {
+        tx.scroll_into_view(node_key(n, groups));
+    }
+    true
+}
+
+/// How to start typing, or the field: a single-line text field while it edits, with the
+/// keys the panel keeps (↑ ↓ Tab, Return, Esc) handled before it, and the matches counted on
+/// the right.
+fn filter<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, lens: fn(&mut S) -> &mut Knobs, plan: &Plan) -> El {
     let typed = !k.query.is_empty();
-    let mut r = row()
-        .key("knobs-filter")
-        .w_full()
-        .h(28.0)
-        .px(PAD)
-        .gap(1.0)
-        .center_y()
-        .radius(7.0)
-        .fill(st.inset)
-        .on_press_tx(move |s: &mut S, tx: &mut Tx| {
+    let mut r = row().key("knobs-filter").w_full().h(28.0).px(PAD).gap(8.0).center_y().radius(7.0).fill(st.inset);
+    if k.filtering {
+        let keys = plan.clone();
+        let mut edit = k.edit().clone();
+        if edit.text != k.query {
+            edit.replace_text(k.query.clone());
+        }
+        let field = text_input(&edit, LABEL)
+            .key("knobs-filter-input")
+            .single_line()
+            .color(st.fg)
+            .caret(st.fg2, st.fg.alpha(0.22))
+            .grow(1.0)
+            .min_w(0.0)
+            .on_edit(edit_access(move |s: &mut S| lens(s).edit_mut()))
+            .on_input_key(move |s: &mut S, ev, tx: &mut Tx| {
+                let k = lens(s);
+                k.sync_edit();
+                let did = k.filter_key(groups, &keys, ev);
+                took(k, did, groups, tx)
+            });
+        let keys = plan.clone();
+        let field = field.on_input_change(move |s: &mut S, tx: &mut Tx| {
             tx.instant();
             let k = lens(s);
+            k.edited();
             k.kbd = true;
-            k.filtering = true;
-        })
-        .child(text(if typed { k.query.clone() } else if k.filtering { String::new() } else { "Press / to filter".to_owned() }).font(LABEL).color(if typed { st.fg } else { st.fg3 }).truncate_fade().shrink());
-    if k.filtering {
-        r = r.child(el().key("caret").w(1.5).h(14.0).fill(st.fg2));
+            k.refilter(groups, &keys);
+        });
+        // Taking the field out gives focus back to the panel.
+        r = r.child(el().key("knobs-filter-field").grow(1.0).min_w(0.0).h_full().center_y().focus_return("knobs-panel").child(field));
+    } else {
+        r = r
+            .on_press_tx(move |s: &mut S, tx: &mut Tx| {
+                tx.instant();
+                let k = lens(s);
+                k.kbd = true;
+                k.start_filter();
+            })
+            .child(text(if typed { k.query.clone() } else { "Press / to filter".to_owned() }).font(LABEL).color(if typed { st.fg } else { st.fg3 }).truncate_fade().shrink());
     }
     if typed {
         let n: usize = plan.sections.iter().flat_map(|s| &s.subs).map(|s| s.knobs.len()).sum();
-        r = r.child(spacer()).child(text(if n == 1 { "1 knob".to_owned() } else { format!("{n} knobs") }).font(VALUE).color(st.fg3));
+        if !k.filtering {
+            r = r.child(spacer());
+        }
+        r = r.child(text(if n == 1 { "1 knob".to_owned() } else { format!("{n} knobs") }).font(VALUE).color(st.fg3));
     }
     r
 }
@@ -207,3 +241,7 @@ fn about(k: &Knobs, groups: &[Group], st: Style) -> El {
 #[cfg(test)]
 #[path = "side_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "filter_tests.rs"]
+mod filter_tests;

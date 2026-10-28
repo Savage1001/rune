@@ -92,16 +92,16 @@ fn tabs_layout_opens_on_the_page_thats_showing() {
 }
 
 #[test]
-fn slash_then_typing_filters_by_name_and_description() {
+fn slash_then_a_query_filters_by_name_and_description() {
     let mut k = Knobs::default();
     assert_eq!(key(&mut k, Key::Text("t".into())), Did::Not, "a letter alone doesn't filter");
     assert!(k.query.is_empty());
     key(&mut k, Key::Text("/".into()));
     assert!(k.filtering);
-    for c in ["t", "a", "l", "l"] {
-        key(&mut k, Key::Text(c.into()));
-    }
-    assert_eq!(k.query, "tall");
+    assert_eq!(key(&mut k, Key::Text("t".into())), Did::Not, "the field takes typing, not the tree");
+    assert_eq!(key(&mut k, Key::Right), Did::Not, "and ← →");
+    k.set_query("tall");
+    k.refilter(GROUPS, &plan(&k, GROUPS, seen(&[])));
     let p = plan(&k, GROUPS, seen(&[]));
     assert_eq!(rows(&p), vec![Node::Group(0), Node::Knob(0, 0)], "matches A's description");
     assert_eq!(k.at(), Some(Node::Knob(0, 0)), "the keyboard lands on the first match");

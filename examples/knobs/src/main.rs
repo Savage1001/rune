@@ -69,7 +69,7 @@ fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
 
 fn main() {
     let spec = AppSpec::<State> {
-        scenes: &[("open", |s| s.knobs.show())],
+        scenes: &[("open", |s| s.knobs.show()), ("filter", |s| { s.knobs.show(); s.knobs.filter("pad"); })],
         on_key: Some(on_key),
         ..AppSpec::new("Knobs", (820.0, 520.0), State::default, view)
     };

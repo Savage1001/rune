@@ -6775,7 +6775,7 @@ impl<S: 'static> Runtime<S> {
                             let (a, b) = e.range();
                             if a != b && e.preedit.is_none() {
                                 let (da, db) = e.display_selection_range(a, b);
-                                selectable::push_selection(&mut self.instances, layout, da, db,
+                                selectable::push_field_selection(&mut self.instances, layout, da, db,
                                     origin, tk, premul(inp.selection, o, srgb), s, clip, fade);
                             }
                             caret = input_caret.map(|(caret, _)| caret);

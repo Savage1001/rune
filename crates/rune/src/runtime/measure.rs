@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(feature = "storage-probe")]
+mod storage_probe;
+
 pub(super) fn collect_virtual_inputs(el: &El, parent: &str, index: usize, inert: bool, inputs: &mut HashMap<String, Box<InputSpec>>) {
     // Most offscreen rows hold no focused field; find that out before building any paths.
     if !crate::memo::has_focused_input(el) {

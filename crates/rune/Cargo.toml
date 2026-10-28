@@ -8,6 +8,8 @@ license.workspace = true
 default = ["ogg-audio", "svg"]
 # Headless benchmark instrumentation; ordinary builds contain no phase clocks.
 frame-profile = ["dep:procwatch", "dep:libc"]
+# Representation inventory for the storage experiment; no hooks in default builds.
+storage-probe = []
 # Native Open, Save and folder dialogs: rfd on macOS and Windows, the XDG desktop portal over zbus on Linux.
 native-file-dialog = ["dep:rfd"]
 hot = ["dep:subsecond", "dep:dioxus-devtools"]
@@ -120,6 +122,10 @@ wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"]
 [[example]]
 name = "tree_swap"
 required-features = ["frame-profile"]
+
+[[example]]
+name = "storage_probe"
+required-features = ["storage-probe"]
 
 [[example]]
 name = "cache_pan_zoom"

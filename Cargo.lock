@@ -2976,6 +2976,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rune-perf"
+version = "0.1.0"
+dependencies = [
+ "procwatch",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "rune-ref"
 version = "0.0.1"
 dependencies = [

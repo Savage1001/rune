@@ -12,7 +12,8 @@
 //! elsewhere still shows; that's the point.
 //!
 //! [`thread_allocations`] counts this thread's allocations, so a test can assert a hot path
-//! allocates nothing while other tests run in parallel.
+//! allocates nothing while other tests run in parallel. [`thread_allocated_bytes`] counts the
+//! bytes they asked for, for a per-frame allocation figure.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -36,17 +37,29 @@ static TAG_NAMES: [AtomicPtr<&'static str>; TAGS] = [const { AtomicPtr::new(std:
 thread_local! {
     static TAG: Cell<u8> = const { Cell::new(0) };
     static THREAD_ALLOCS: Cell<u64> = const { Cell::new(0) };
+    static THREAD_BYTES: Cell<u64> = const { Cell::new(0) };
 }
 
-fn counted() {
+fn counted(size: usize) {
     ALLOCS.fetch_add(1, Relaxed);
     let _ = THREAD_ALLOCS.try_with(|c| c.set(c.get() + 1));
+    let _ = THREAD_BYTES.try_with(|c| c.set(c.get().wrapping_add(size as u64)));
 }
 
 /// Allocations (and reallocations) made on this thread so far; 0 unless [`Counting`] is the
 /// global allocator.
 pub fn thread_allocations() -> u64 {
     THREAD_ALLOCS.try_with(Cell::get).unwrap_or(0)
+}
+
+/// Bytes this thread has asked for so far: every successful alloc, alloc_zeroed and realloc
+/// (a realloc counts its whole new size), frees not subtracted. Traffic, not live heap.
+/// `None` until [`Counting`] has served a request, so a missing allocator never reads as zero.
+pub fn thread_allocated_bytes() -> Option<u64> {
+    if INSTALLED.load(Relaxed) == 0 {
+        return None;
+    }
+    THREAD_BYTES.try_with(Cell::get).ok()
 }
 
 pub struct Counting<A = System> {
@@ -94,7 +107,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         INSTALLED.store(1, Relaxed);
         let p = unsafe { self.inner.alloc(layout) };
         if !p.is_null() {
-            counted();
+            counted(layout.size());
             grew(layout.size());
         }
         p
@@ -104,7 +117,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         INSTALLED.store(1, Relaxed);
         let p = unsafe { self.inner.alloc_zeroed(layout) };
         if !p.is_null() {
-            counted();
+            counted(layout.size());
             grew(layout.size());
         }
         p
@@ -118,7 +131,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let p = unsafe { self.inner.realloc(ptr, layout, new_size) };
         if !p.is_null() {
-            counted();
+            counted(new_size);
             shrank(layout.size());
             grew(new_size);
         }

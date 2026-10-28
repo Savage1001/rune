@@ -4,6 +4,8 @@
 //!   peak, resident size, total CPU including threads that have exited, open file descriptors,
 //!   and each live thread's name and CPU. [`snapshot_of`] reads the same of another process of
 //!   this user, with no task port, so it works on a hardened release build.
+//! - [`usage`]: just the footprint, its peak, resident size and open files, without walking
+//!   threads or touching the heap counters: cheap enough for a recorder to sample every second.
 //! - [`alloc::Counting`]: an optional counting global allocator for dev builds and tests.
 //! - [`Gauge`]: named byte counts for memory the allocator never sees (pixel buffers,
 //!   IOSurfaces, GPU textures). With both, [`Snapshot::unaccounted`] is the footprint nothing
@@ -14,7 +16,8 @@
 //!   hands each warning to a callback.
 //! - [`serve`]: a fresh snapshot as JSON on a loopback port, for a dev panel or `curl`.
 //!
-//! macOS only for now; elsewhere [`snapshot`] returns `None` and [`watch`] does nothing.
+//! macOS only for now; elsewhere [`snapshot`] returns `None`, [`usage`] has every field `None`,
+//! and [`watch`] does nothing.
 
 pub mod alloc;
 pub mod gauge;
@@ -126,13 +129,9 @@ pub fn snapshot() -> Option<Snapshot> {
 #[cfg(target_os = "macos")]
 pub fn snapshot_of(pid: i32) -> Option<Snapshot> {
     use std::mem::{MaybeUninit, size_of};
+    let usage = rusage(pid)?;
     // SAFETY: plain libproc and mach calls into buffers sized for them.
     unsafe {
-        let mut usage = MaybeUninit::<libc::rusage_info_v4>::zeroed();
-        if libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, usage.as_mut_ptr().cast()) != 0 {
-            return None;
-        }
-        let usage = usage.assume_init();
         let ticks = ticks_to_seconds();
         const PROC_PIDLISTTHREADS: i32 = 6;
         let mut ids = vec![0u64; 512];
@@ -157,7 +156,7 @@ pub fn snapshot_of(pid: i32) -> Option<Snapshot> {
             footprint_peak: usage.ri_lifetime_max_phys_footprint,
             resident: usage.ri_resident_size,
             cpu_s: (usage.ri_user_time + usage.ri_system_time) as f64 * ticks,
-            fds: open_fds(pid),
+            fds: open_fds(pid).unwrap_or(0),
             threads,
             heap: None,
             gauges: Vec::new(),
@@ -170,21 +169,64 @@ pub fn snapshot_of(_pid: i32) -> Option<Snapshot> {
     None
 }
 
-/// `PROC_PIDLISTFDS` fills one 8-byte `proc_fdinfo` per descriptor. Asking with no buffer
-/// returns a size with headroom; the second call returns what it filled.
+/// This process's memory and open files, each `None` where it can't be read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Usage {
+    /// Physical footprint, as in [`Snapshot::footprint`].
+    pub footprint: Option<u64>,
+    pub footprint_peak: Option<u64>,
+    pub resident: Option<u64>,
+    pub fds: Option<u32>,
+}
+
+/// [`snapshot`]'s memory and file counts without its thread walk or heap counters: two
+/// libproc calls for memory and two for files. A failed read leaves its fields `None`.
 #[cfg(target_os = "macos")]
-fn open_fds(pid: i32) -> u32 {
+pub fn usage() -> Usage {
+    let pid = std::process::id() as i32;
+    let mut out = Usage { fds: open_fds(pid), ..Usage::default() };
+    if let Some(u) = rusage(pid) {
+        out.footprint = Some(u.ri_phys_footprint);
+        out.footprint_peak = Some(u.ri_lifetime_max_phys_footprint);
+        out.resident = Some(u.ri_resident_size);
+    }
+    out
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn usage() -> Usage {
+    Usage::default()
+}
+
+#[cfg(target_os = "macos")]
+fn rusage(pid: i32) -> Option<libc::rusage_info_v4> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v4>::zeroed();
+    // SAFETY: a zeroed buffer of the size RUSAGE_INFO_V4 fills; read only on success.
+    unsafe {
+        if libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, usage.as_mut_ptr().cast()) != 0 {
+            return None;
+        }
+        Some(usage.assume_init())
+    }
+}
+
+/// `PROC_PIDLISTFDS` fills one 8-byte `proc_fdinfo` per descriptor. Asking with no buffer
+/// returns a size with headroom; the second call returns what it filled. Either call
+/// returns 0 on failure, so 0 is `None`.
+#[cfg(target_os = "macos")]
+fn open_fds(pid: i32) -> Option<u32> {
     const PROC_PIDLISTFDS: i32 = 1;
     const FDINFO: usize = 8;
     // SAFETY: the first call writes nothing; the second writes at most `buf`'s length.
     unsafe {
         let want = libc::proc_pidinfo(pid, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0);
         if want <= 0 {
-            return 0;
+            return None;
         }
         let mut buf = vec![0u64; want as usize / FDINFO + 1];
         let got = libc::proc_pidinfo(pid, PROC_PIDLISTFDS, 0, buf.as_mut_ptr().cast(), (buf.len() * FDINFO) as i32);
-        (got.max(0) as usize / FDINFO) as u32
+        (got > 0).then(|| (got as usize / FDINFO) as u32)
     }
 }
 
@@ -518,6 +560,55 @@ mod tests {
         assert_eq!(alloc::thread_allocations(), quiet);
     }
 
+    #[test]
+    fn thread_bytes_count_requests_not_frees_on_this_thread_only() {
+        use std::alloc::{GlobalAlloc, Layout};
+        let allocator = alloc::Counting::system();
+        let before = alloc::thread_allocated_bytes().unwrap();
+        // SAFETY: valid layouts, checked allocations, each freed once with its layout.
+        unsafe {
+            let layout = Layout::from_size_align(128, 8).unwrap();
+            let p = allocator.alloc_zeroed(layout);
+            assert!(!p.is_null());
+            let p = allocator.realloc(p, layout, 256);
+            assert!(!p.is_null());
+            allocator.dealloc(p, Layout::from_size_align(256, 8).unwrap());
+        }
+        assert_eq!(alloc::thread_allocated_bytes().unwrap() - before, 384);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let start = alloc::thread_allocated_bytes().unwrap();
+                    for _ in 0..10_000 {
+                        drop(std::hint::black_box(vec![42u8; 128]));
+                    }
+                    alloc::thread_allocated_bytes().unwrap() - start
+                })
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().unwrap(), 1_280_000);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn usage_reads_memory_and_files_without_threads() {
+        let u = usage();
+        let footprint = u.footprint.unwrap();
+        assert!(footprint > 0 && u.footprint_peak.unwrap() >= footprint, "{u:?}");
+        assert!(u.resident.unwrap() > 0 && u.fds.unwrap() >= 3, "{u:?}");
+        let opened: Vec<_> = (0..8).map(|_| std::fs::File::open("Cargo.toml").unwrap()).collect();
+        assert!(usage().fds.unwrap() >= u.fds.unwrap() + 4);
+        drop(opened);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn usage_is_unknown_off_macos() {
+        assert_eq!(usage(), Usage::default());
+    }
+
     fn at(footprint: u64, cpu_s: f64) -> Snapshot {
         Snapshot {
             footprint,
@@ -530,6 +621,14 @@ mod tests {
 
     fn lines(events: &[Event]) -> String {
         events.iter().map(|e| e.line.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[cfg(target_os = "macos")]
+    fn thread_cpu_s() -> f64 {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: fills `t`.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        t.tv_sec as f64 + t.tv_nsec as f64 / 1e9
     }
 
     #[cfg(target_os = "macos")]
@@ -547,9 +646,11 @@ mod tests {
         // A thread that burns CPU and exits still counts.
         let before = snapshot().unwrap();
         std::thread::spawn(|| {
+            // Spin on the thread's own CPU clock: on a loaded machine 300 ms of wall time can
+            // be well under 200 ms of CPU.
             let t = Instant::now();
             let mut x = 0u64;
-            while t.elapsed() < Duration::from_millis(300) {
+            while thread_cpu_s() < 0.3 && t.elapsed() < Duration::from_secs(10) {
                 x = std::hint::black_box(x.wrapping_add(1));
             }
         })

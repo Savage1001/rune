@@ -7,7 +7,9 @@
 //! a knob, ←/→ step it (⇧ for 10×), Tab or [ ] switch groups. Each group has Random, Reset, Undo, Copy (`name = value` lines)
 //! and presets, both declared in code and saved from the panel. Esc closes.
 //!
-//! Values are plain `name -> f32`; the app saves `values` and `saved` with its other state.
+//! Values are plain `name -> f32`; the app saves `values`, `saved` and `kept` with its other
+//! state. [`Knobs::change`] makes an undoable change ([`Knobs::undo`], [`Knobs::redo`]);
+//! [`Knobs::keep`] saves the values Revert goes back to and [`Knobs::differs`] marks.
 //! The panel is a dev tool: without the `panel` feature, `layer` draws nothing, `key` handles
 //! nothing and `get` returns each knob's default, so a shipped build runs on the constants.
 //!
@@ -228,6 +230,10 @@ pub struct Knobs {
     pub values: BTreeMap<String, f32>,
     /// Presets saved from the panel, by group name, in the order they were saved.
     pub saved: BTreeMap<String, Saved>,
+    /// The values as last kept with [`Knobs::keep`]: [`Knobs::revert`] goes back to them and
+    /// [`Knobs::differs`] marks a knob moved off them. Knobs left out were kept at their
+    /// defaults. The app saves it with `values`.
+    pub kept: BTreeMap<String, f32>,
     /// The group the panel shows; the last one used, and the first group until one is picked.
     pub group: Option<String>,
     /// Picking a region with the target button: the panel shows no group meanwhile.
@@ -270,6 +276,7 @@ pub struct Knobs {
     /// The preset each group last applied.
     active: BTreeMap<String, String>,
     undo: Vec<BTreeMap<String, f32>>,
+    redo: Vec<BTreeMap<String, f32>>,
     seed: u64,
 }
 
@@ -475,22 +482,76 @@ impl Knobs {
         g.knobs.iter().any(|k| (self.get(k) - k.default).abs() > 1e-4) || self.active.get(g.name).is_some_and(|a| self.drifted(g, a))
     }
 
-    /// Remembers the values for Undo, once per change.
-    fn checkpoint(&mut self) {
+    /// Remembers the values for Undo, once per change: call it before a change the panel makes
+    /// itself (a drag calls it once, as it starts). A new change drops what Redo had.
+    pub fn checkpoint(&mut self) {
         if self.undo.last() != Some(&self.values) {
             self.undo.push(self.values.clone());
             if self.undo.len() > 100 {
                 self.undo.remove(0);
             }
         }
+        self.redo.clear();
     }
-    pub fn undo(&mut self) {
-        if let Some(v) = self.undo.pop() {
-            self.values = v;
+    /// Sets `k` to `v` so Undo can take it back.
+    pub fn change(&mut self, k: &Knob, v: f32) {
+        if (self.get(k) - k.clamp(v)).abs() > 1e-6 {
+            self.checkpoint();
+            self.set(k, v);
         }
+    }
+    /// Takes back the last change. True if there was one.
+    pub fn undo(&mut self) -> bool {
+        let Some(v) = self.undo.pop() else { return false };
+        self.redo.push(std::mem::replace(&mut self.values, v));
+        true
+    }
+    /// Puts back the change Undo took. True if there was one.
+    pub fn redo(&mut self) -> bool {
+        let Some(v) = self.redo.pop() else { return false };
+        self.undo.push(std::mem::replace(&mut self.values, v));
+        true
     }
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// What `k` was when the values were last kept.
+    pub fn kept_value(&self, k: &Knob) -> f32 {
+        k.clamp(self.kept.get(k.name).copied().unwrap_or(k.default))
+    }
+    /// `k` has moved off its kept value.
+    pub fn differs(&self, k: &Knob) -> bool {
+        (self.get(k) - self.kept_value(k)).abs() > 1e-4
+    }
+    /// Keeps every value as it is now, as what Revert goes back to.
+    pub fn keep(&mut self) {
+        self.kept = self.values.clone();
+    }
+    /// Keeps `knobs` as they are now, the rest as they were kept.
+    pub fn keep_some(&mut self, knobs: &[Knob]) {
+        for k in knobs {
+            match self.values.get(k.name) {
+                Some(v) => self.kept.insert(k.name.to_owned(), *v),
+                None => self.kept.remove(k.name),
+            };
+        }
+    }
+    /// Puts `knobs` back to their kept values, undoably.
+    pub fn revert(&mut self, knobs: &[Knob]) {
+        if !knobs.iter().any(|k| self.differs(k)) {
+            return;
+        }
+        self.checkpoint();
+        for k in knobs {
+            match self.kept.get(k.name) {
+                Some(v) => self.values.insert(k.name.to_owned(), *v),
+                None => self.values.remove(k.name),
+            };
+        }
     }
 
     /// Each of `g`'s knobs to a random value in its range.

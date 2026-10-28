@@ -157,7 +157,9 @@ pub(crate) fn head<S: 'static>(k: &Knobs, groups: &'static [Group], st: Style, l
             .child(tool(st, "knobs-random", &icons::RANDOM, "Random", true, lens, move |k, _| k.random(&g)))
             .child(tool(st, "knobs-reset", &icons::RESET, "Reset", k.can_reset(&g), lens, move |k, _| k.reset(&g)));
     }
-    head.child(tool(st, "knobs-undo", &icons::UNDO, "Undo", k.can_undo(), lens, |k, _| k.undo())).child(tool(st, "knobs-copy", &icons::COPY, "Copy values", true, lens, move |k, tx| {
+    head.child(tool(st, "knobs-undo", &icons::UNDO, "Undo", k.can_undo(), lens, |k, _| {
+        k.undo();
+    })).child(tool(st, "knobs-copy", &icons::COPY, "Copy values", true, lens, move |k, tx| {
         let all: Vec<Group> = match k.current(groups) {
             Some(g) => vec![g],
             None => groups.to_vec(),

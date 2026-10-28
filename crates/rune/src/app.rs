@@ -39,6 +39,8 @@ pub struct App<S: 'static> {
     pub(crate) release_gpu: bool,
     pub(crate) keep_running: bool,
     pub(crate) on_close: Option<fn(&mut S, &mut Tx)>,
+    pub(crate) layer: Option<Layer>,
+    pub(crate) window_options: WindowOptions,
     pub(crate) shared: Arc<Shared<S>>,
 }
 
@@ -52,6 +54,8 @@ impl<S: 'static> App<S> {
             release_gpu: false,
             keep_running: false,
             on_close: None,
+            layer: None,
+            window_options: WindowOptions::default(),
             shared: Arc::default(),
         }
     }
@@ -100,6 +104,22 @@ impl<S: 'static> App<S> {
         self
     }
 
+    /// Size limits and resizability for the window. A window whose minimum equals its maximum
+    /// is fixed-size, which tiling compositors (niri, sway) open floating, as dialogs.
+    pub fn window_options(mut self, options: WindowOptions) -> Self {
+        self.window_options = options;
+        self
+    }
+
+    /// Show the UI as a Wayland layer-shell surface (`zwlr_layer_shell_v1`) instead of a
+    /// window: a transparent overlay the compositor places by anchor, which never tiles and
+    /// (by default) never takes keyboard focus. Linux on Wayland only; elsewhere the app opens
+    /// its usual window. Opening and closing map and unmap the surface.
+    pub fn layer(mut self, layer: Layer) -> Self {
+        self.layer = Some(layer);
+        self
+    }
+
     /// A handle for other threads; requests made before `run` apply once it starts.
     pub fn handle(&self) -> AppHandle<S> {
         AppHandle {
@@ -116,9 +136,16 @@ impl<S: 'static> App<S> {
         };
         if args.headless() {
             crate::tooling::headless(self, args);
-        } else {
-            crate::window::run(self, args);
+            return;
         }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if self.layer.is_some() {
+            match crate::layer::available() {
+                Ok(()) => return crate::layer::run(self, args),
+                Err(e) => eprintln!("rune: no layer shell ({e}); opening a window"),
+            }
+        }
+        crate::window::run(self, args);
     }
 }
 
@@ -166,6 +193,12 @@ impl<S: 'static> AppHandle<S> {
         self.request(|q| q.window = Some(WindowRequest::Close));
     }
 
+    /// Move or reshape a layer surface (`App::layer`): a mapped surface remaps with the new
+    /// placement, an unmapped one uses it when it next opens. Ignored by windows.
+    pub fn set_layer(&self, layer: Layer) {
+        self.request(|q| q.layer = Some(layer));
+    }
+
     /// Quit the app: the window closes without `on_close`, and `run` returns.
     pub fn quit(&self) {
         self.request(|q| q.quit = true);
@@ -183,6 +216,79 @@ impl<S: 'static> AppHandle<S> {
     }
 }
 
+/// Window size limits (`App::window_options`); a subset of upstream Rune's `WindowOptions`
+/// with the same names, so literals ending in `..Default::default()` carry over.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowOptions {
+    /// Logical minimum; None keeps Rune's default floor (420 × 400).
+    pub min_size: Option<(f32, f32)>,
+    /// Logical maximum content size. None leaves it unconstrained.
+    pub max_size: Option<(f32, f32)>,
+    /// Whether the user can resize the window.
+    pub resizable: bool,
+}
+
+impl Default for WindowOptions {
+    fn default() -> Self {
+        WindowOptions { min_size: None, max_size: None, resizable: true }
+    }
+}
+
+/// Where a layer surface sits (`App::layer`). Sizes and margins are in points; a zero size
+/// along an axis anchored on both sides stretches across the output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layer {
+    /// Names the surface's purpose to the compositor (layer rules match on it).
+    pub namespace: &'static str,
+    pub level: LayerLevel,
+    pub anchor: LayerAnchor,
+    pub size: (f32, f32),
+    /// Top, right, bottom, left, from the anchored edges.
+    pub margin: [f32; 4],
+    /// Space reserved from other surfaces at the anchored edge; 0 reserves none, -1 ignores
+    /// other surfaces' zones.
+    pub exclusive_zone: i32,
+    /// Take keyboard focus when clicked (`on_demand`); off by default, so the surface never
+    /// steals typing.
+    pub keyboard: bool,
+    /// Take pointer input only over hit targets (`on_press`, `on_hover`, `on_drag`, text
+    /// fields), letting clicks elsewhere through to what's below. On by default.
+    pub click_through: bool,
+}
+
+impl Default for Layer {
+    fn default() -> Self {
+        Layer {
+            namespace: "rune",
+            level: LayerLevel::Overlay,
+            anchor: LayerAnchor::default(),
+            size: (0.0, 0.0),
+            margin: [0.0; 4],
+            exclusive_zone: 0,
+            keyboard: false,
+            click_through: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LayerLevel {
+    Background,
+    Bottom,
+    Top,
+    /// Above fullscreen windows.
+    #[default]
+    Overlay,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct LayerAnchor {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WindowRequest {
     /// Show and focus, with an activation token when one was forwarded.
@@ -192,6 +298,7 @@ pub(crate) enum WindowRequest {
 
 pub(crate) struct Requests<S> {
     pub window: Option<WindowRequest>,
+    pub layer: Option<Layer>,
     pub quit: bool,
     pub updates: Vec<Update<S>>,
 }
@@ -200,6 +307,7 @@ impl<S> Default for Requests<S> {
     fn default() -> Self {
         Requests {
             window: None,
+            layer: None,
             quit: false,
             updates: Vec::new(),
         }

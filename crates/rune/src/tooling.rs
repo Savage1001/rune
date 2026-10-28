@@ -551,12 +551,14 @@ pub fn headless<S: 'static>(app: crate::app::App<S>, args: Args) {
         }
         return;
     }
+    let transparent = app.layer.is_some();
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let scale = args.scale.unwrap_or(2.0);
     let size = args.size.unwrap_or(spec.size);
     let dark = args.theme.as_deref() != Some("light");
     let state_ms = launched.elapsed().as_secs_f64() * 1000.0;
     let mut rt = runtime_for(&spec, state, size, Env { system_dark: dark, scale }, std::sync::Arc::new(|| {}));
+    rt.transparent = transparent;
     let runtime_ms = launched.elapsed().as_secs_f64() * 1000.0 - state_ms;
 
     let script = args.script.as_ref().map(load_script).unwrap_or_default();

@@ -6,6 +6,8 @@
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 mod activation;
 mod app;
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+mod layer;
 pub mod color;
 pub mod edit;
 pub mod el;
@@ -20,7 +22,7 @@ pub mod tok;
 pub mod tooling;
 mod window;
 
-pub use app::{App, AppHandle};
+pub use app::{App, AppHandle, Layer, LayerAnchor, LayerLevel, WindowOptions};
 pub use color::{Color, oklch, oklcha};
 pub use edit::{Ime, Key, KeyEvent, Mods, TextEdit};
 pub use el::{

@@ -39,6 +39,7 @@ struct Host<S: 'static> {
     on_close: Option<fn(&mut S, &mut Tx)>,
     release_gpu: bool,
     open_at_start: bool,
+    options: crate::app::WindowOptions,
     shared: Arc<Shared<S>>,
     rt: Runtime<S>,
     win: Option<Win>,
@@ -60,6 +61,7 @@ pub fn run<S: 'static>(app: App<S>, args: Args) {
         let _ = proxy.send_event(());
     });
     let (open, keep_running, on_close, release_gpu) = (app.open, app.keep_running, app.on_close, app.release_gpu);
+    let options = app.window_options.clone();
     let (spec, state, shared) = app.into_parts(args.scene.as_deref());
     let size = args.size.unwrap_or(spec.size);
     // The window reports the system appearance and scale when it opens.
@@ -74,6 +76,7 @@ pub fn run<S: 'static>(app: App<S>, args: Args) {
         on_close,
         release_gpu,
         open_at_start: open,
+        options,
         shared,
         rt,
         win: None,
@@ -278,11 +281,15 @@ impl<S: 'static> Host<S> {
     #[cfg_attr(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))), allow(unused_variables))]
     fn create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>) {
         let size = self.args.size.unwrap_or(self.spec.size);
-        #[allow(unused_mut)]
+        let min = self.options.min_size.unwrap_or((420.0, 400.0));
         let mut attrs = Window::default_attributes()
             .with_title(self.spec.title)
             .with_inner_size(LogicalSize::new(size.0 as f64, size.1 as f64))
-            .with_min_inner_size(LogicalSize::new(420.0, 400.0));
+            .with_min_inner_size(LogicalSize::new(min.0 as f64, min.1 as f64))
+            .with_resizable(self.options.resizable);
+        if let Some(max) = self.options.max_size {
+            attrs = attrs.with_max_inner_size(LogicalSize::new(max.0 as f64, max.1 as f64));
+        }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         {
             if let Some(id) = crate::tooling::app_id() {

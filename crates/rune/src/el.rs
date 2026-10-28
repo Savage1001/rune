@@ -263,6 +263,7 @@ pub struct El {
     pub(crate) children: Vec<El>,
     pub(crate) on_press: Option<PressFn>,
     pub(crate) on_hover: Option<PressFn>,
+    pub(crate) on_hover_end: Option<PressFn>,
     pub(crate) above: Option<Anchor>,
     pub(crate) on_drag: Option<DragFn>,
     pub(crate) motion: Option<Spring>,
@@ -284,12 +285,21 @@ fn base(dir: FlexDirection) -> El {
         key: None,
         role: "group",
         label: None,
-        style: Style { display: Display::Flex, flex_direction: dir, flex_shrink: 0.0, ..Default::default() },
+        // Relative, so every box is the containing block for pinned children (taffy 0.15
+        // defaults to static, which would resolve `pin` right/bottom against the window).
+        style: Style {
+            display: Display::Flex,
+            flex_direction: dir,
+            flex_shrink: 0.0,
+            position: Position::Relative,
+            ..Default::default()
+        },
         vis: Visual::default(),
         text: None,
         children: Vec::new(),
         on_press: None,
         on_hover: None,
+        on_hover_end: None,
         above: None,
         on_drag: None,
         motion: None,
@@ -598,6 +608,12 @@ impl El {
     /// Called once when the pointer enters this hit target, not on animation frames.
     pub fn on_hover<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
         self.on_hover = Some(Rc::new(move |s, _| f(downcast::<S>(s))));
+        self
+    }
+    /// Called once when the pointer leaves this hit target: onto another target (a child
+    /// target counts), onto nothing, or out of the window.
+    pub fn on_hover_end<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
+        self.on_hover_end = Some(Rc::new(move |s, _| f(downcast::<S>(s))));
         self
     }
 

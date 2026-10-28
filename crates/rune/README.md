@@ -144,8 +144,29 @@ app.run();
   reopen, `release_gpu_when_closed`; and under Xwayland, hide/show and `focus_window`. Not yet run on KWin, Mutter, niri,
   macOS or Windows.
 - Headless tooling runs ignore window requests and apply updates before each frame.
-- Not yet: several windows, window kinds (panel, transparent click-through overlay, Wayland
-  layer-shell), macOS activation policy, a per-app minimum size.
+- Not yet: several windows, other window kinds (panel, macOS/Windows transparent overlays),
+  macOS activation policy, a per-app minimum size.
+
+### Layer surfaces (`App::layer`, `layer.rs`, Linux/Wayland)
+
+`App::new(spec).layer(Layer { namespace, level, anchor, size, margin, .. })` presents the same
+runtime on a `zwlr_layer_surface_v1` instead of a window, for overlays, HUDs and notifications
+(`examples/hokum`, the Hokum notification daemon, is built on it).
+
+- Transparent: the runtime clears to the root's fill with its own alpha (`Runtime::transparent`)
+  and the swapchain composites premultiplied.
+- `click_through` (on by default) sets the input region to the hit targets after every frame
+  (`Runtime::hit_rects`), so the pointer passes through everything else.
+- Frames are paced by `wl_surface.frame` callbacks while something animates; an idle surface
+  draws nothing. Fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, else the
+  integer buffer scale. Cursor shapes through `wp_cursor_shape_v1`.
+- `open` maps a new surface on the compositor's chosen output and `close` destroys it (keeping the
+  runtime, GPU device and renderer). A remapped overlay doesn't open settled: it came back because
+  something new arrived, which should animate in.
+- Falls back to a window when the compositor has no layer shell. Pointer input only (no
+  keyboard yet). Verified on niri 26.04 at scale 2.
+- `.on_hover_end(..)` pairs with `.on_hover(..)`: it runs when the pointer moves onto another
+  target or nothing, or leaves the surface (overlays use it to pause timers).
 
 ## Run
 

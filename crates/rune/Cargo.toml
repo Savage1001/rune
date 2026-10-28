@@ -22,6 +22,7 @@ raw-window-handle = "0.6"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"] }

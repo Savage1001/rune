@@ -1,0 +1,256 @@
+name: Hokum release
+
+# Builds and publishes Hokum (examples/hokum) for Linux x86_64 and aarch64
+# from one exact commit, split the way Hex's and OpenCode's releases are
+# (examples/hokum/docs/releasing.md):
+#
+# - build jobs (build, aur-stage) run repository code: cargo, the build
+#   scripts, makepkg. They have no environment, no secrets, and no write
+#   token, and they produce unsigned files.
+# - the tag and AUR jobs check out only .github/release/ and run only those
+#   scripts and SHA-pinned actions, on artifacts they treat as data.
+# - every artifact carries a SHA256SUMS whose digest the job that made it
+#   reports as an output; every job that downloads it checks that digest
+#   (.github/release/verify-artifacts.sh).
+#
+# Channels (.github/release/hokum/plan.sh):
+# - check (the default): builds both tarballs, stages and installs hokum-bin
+#   in an Arch container, and publishes nothing; its last job pushes and
+#   deletes a throwaway hokum-v0.0.0-test-<run> tag to prove it can tag.
+# - stable, dispatched from main: the version in examples/hokum/Cargo.toml.
+#   Tags trigger nothing: once both tarballs built and hokum-bin installed,
+#   the tag job tags hokum-v<version> on the released commit and creates the
+#   GitHub release with the tarballs and SHA256SUMS; then the AUR job pushes
+#   hokum-bin, whose sources are those release files.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, tag, or branch to release
+        required: true
+        default: main
+      channel:
+        description: check (build and test; publish nothing) or stable (tag, GitHub release, AUR)
+        type: choice
+        options: [check, stable]
+        default: check
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hokum-release-${{ inputs.channel }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      channel: ${{ steps.plan.outputs.channel }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          sparse-checkout: |
+            /.github/release/
+            /examples/hokum/Cargo.toml
+            /examples/hokum/docs/releases/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: plan
+        run: SHA=$(git rev-parse HEAD) bash .github/release/hokum/plan.sh
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          CHANNEL: ${{ inputs.channel }}
+          GH_TOKEN: ${{ github.token }}
+
+  # ---- Build: repository code; no environment, secrets, or write token ------
+
+  # Both architectures build natively on Ubuntu 24.04, so the executable needs
+  # glibc 2.39 rather than a rolling distribution's newest. Hokum links only
+  # glibc and libgcc_s; it loads Vulkan, Wayland, and xkbcommon at run time,
+  # so the build needs no -dev packages. Mesa's lavapipe gives the headless
+  # smoke render in scripts/build-linux.sh a Vulkan device.
+  linux-x64:
+    name: Linux x86_64
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      HOKUM_VERSION: ${{ needs.plan.outputs.version }}
+      HOKUM_LINUX_ARCH: x86_64
+      HOKUM_LINUX_LABEL: x64
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps: &linux-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y file jq libvulkan1 mesa-vulkan-drivers
+      - name: Build
+        env:
+          HOKUM_RELEASE_DIST: ${{ runner.temp }}/dist
+          CARGO_BUILD_JOBS: 4
+        run: |
+          tarball=$(examples/hokum/scripts/build-linux.sh)
+          test "$tarball" = "$HOKUM_RELEASE_DIST/hokum-$HOKUM_VERSION-linux-$HOKUM_LINUX_LABEL.tar.gz"
+          tar -tzvf "$tarball"
+      - name: Report the glibc floor
+        run: |
+          check=$(mktemp -d)
+          tar -xzf "$RUNNER_TEMP/dist/hokum-$HOKUM_VERSION-linux-$HOKUM_LINUX_LABEL.tar.gz" -C "$check"
+          floor=$(objdump -T "$check/hokum-$HOKUM_VERSION-linux-$HOKUM_LINUX_LABEL/hokum" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "Linux $HOKUM_LINUX_LABEL artifact requires $floor." | tee -a "$GITHUB_STEP_SUMMARY"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-hokum-linux-${{ env.HOKUM_LINUX_ARCH }}
+          path: ${{ runner.temp }}/dist
+
+  linux-arm64:
+    name: Linux aarch64
+    needs: plan
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      HOKUM_VERSION: ${{ needs.plan.outputs.version }}
+      HOKUM_LINUX_ARCH: aarch64
+      HOKUM_LINUX_LABEL: arm64
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps: *linux-steps
+
+  # Stages hokum-bin from both tarballs, builds it, installs it in an Arch
+  # container, and renders with the installed executable. No secrets.
+  aur-stage:
+    name: AUR package
+    needs: [plan, linux-x64, linux-arm64]
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    env:
+      HOKUM_VERSION: ${{ needs.plan.outputs.version }}
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - name: Install tools
+        run: |
+          pacman -Syu --noconfirm --needed git file vulkan-swrast namcap
+          useradd --create-home builder
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/release/download
+        with:
+          pattern: build-hokum-linux-*
+          digests: >-
+            build-hokum-linux-x86_64=${{ needs.linux-x64.outputs.digest }}
+            build-hokum-linux-aarch64=${{ needs.linux-arm64.outputs.digest }}
+      - name: Stage and test hokum-bin
+        run: |
+          stage="$RUNNER_TEMP/aur"
+          x64="$RUNNER_TEMP/in/build-hokum-linux-x86_64/hokum-$HOKUM_VERSION-linux-x64.tar.gz"
+          arm64="$RUNNER_TEMP/in/build-hokum-linux-aarch64/hokum-$HOKUM_VERSION-linux-arm64.tar.gz"
+          chown -R builder: "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          runuser -u builder -- examples/hokum/scripts/release-aur.sh stage "$HOKUM_VERSION" "$x64" "$arm64" "$stage"
+          built=$(runuser -u builder -- examples/hokum/scripts/release-aur.sh test "$stage")
+          namcap "$stage/PKGBUILD" "$built" | tee -a "$GITHUB_STEP_SUMMARY"
+          pacman -U --noconfirm "$built"
+          hokum --version
+          hokum service --snap "$RUNNER_TEMP/snap.png" --scene demo
+          file "$RUNNER_TEMP/snap.png" | grep -q 'PNG image data'
+          mkdir -p "$RUNNER_TEMP/aur-out"
+          (cd "$stage" && cp PKGBUILD .SRCINFO hokum-bin.install "$RUNNER_TEMP/aur-out/")
+          { echo '### AUR PKGBUILD'; echo '```'; cat "$stage/PKGBUILD"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-hokum-aur
+          path: ${{ runner.temp }}/aur-out
+
+  # ---- Publish: only .github/release/ is checked out --------------------------
+
+  # Tags hokum-v<version> on the released commit and creates its GitHub
+  # release with the tarballs and SHA256SUMS, with the built-in token, only
+  # once both architectures built and the AUR package installed. A check run
+  # pushes and deletes a throwaway hokum-v0.0.0-test-<run> tag instead.
+  github:
+    name: Tag and GitHub release
+    needs: [plan, linux-x64, linux-arm64, aur-stage]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      SHA: ${{ needs.plan.outputs.sha }}
+      HOKUM_VERSION: ${{ needs.plan.outputs.version }}
+      HOKUM_RELEASE_COMMIT: ${{ needs.plan.outputs.sha }}
+      HOKUM_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      # Credentials stay so the job can push the tag; it runs no repository
+      # code beyond .github/release/.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          sparse-checkout: |
+            /.github/release/
+            /examples/hokum/docs/releases/
+          sparse-checkout-cone-mode: false
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: build-hokum-linux-*
+          digests: >-
+            build-hokum-linux-x86_64=${{ needs.linux-x64.outputs.digest }}
+            build-hokum-linux-aarch64=${{ needs.linux-arm64.outputs.digest }}
+      - name: Gather the release files
+        run: bash .github/release/hokum/assemble.sh "$RUNNER_TEMP/in" "$RUNNER_TEMP/dist"
+      - name: Tag
+        env:
+          HOKUM_RELEASE_TAG_TEST: ${{ needs.plan.outputs.channel == 'check' && '1' || '' }}
+        run: bash .github/release/hokum/tag-release.sh
+      - name: GitHub release
+        if: needs.plan.outputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOKUM_RELEASE_NOTES: examples/hokum/docs/releases/${{ needs.plan.outputs.version }}.md
+        run: bash .github/release/hokum/publish-github-release.sh "$RUNNER_TEMP/dist"
+
+  # Pushes hokum-bin once the GitHub release serves the files it pins.
+  aur:
+    name: AUR
+    needs: [plan, aur-stage, github]
+    if: needs.plan.outputs.channel == 'stable'
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - name: Check out the release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: ./.github/release/download
+        with:
+          pattern: build-hokum-aur
+          digests: build-hokum-aur=${{ needs.aur-stage.outputs.digest }}
+      - name: Push to the AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: bash .github/release/hokum/push-aur.sh "$RUNNER_TEMP/in/build-hokum-aur"

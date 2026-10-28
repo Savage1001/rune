@@ -95,6 +95,7 @@ pub(crate) struct Node {
     pub text_layout: Option<Rc<Layout<Ink>>>,
     on_press: Option<PressFn>,
     on_hover: Option<PressFn>,
+    on_hover_end: Option<PressFn>,
     above: Option<crate::el::Anchor>,
     on_drag: Option<DragFn>,
     motion: Spring,
@@ -122,6 +123,7 @@ pub(crate) struct Node {
 
 enum Action {
     Hover(String),
+    HoverEnd(String),
     Press(String),
     Drag(String, Drag),
     Key(KeyEvent),
@@ -285,6 +287,9 @@ pub struct Runtime<S: 'static> {
     pub events: Vec<String>,
     /// Counters for perf gates.
     pub stats: FrameStats,
+    /// Clear to the root's fill with its own alpha (premultiplied) instead of opaque, for
+    /// surfaces the compositor blends (layer-shell overlays).
+    pub transparent: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -379,6 +384,7 @@ impl<S: 'static> Runtime<S> {
             settled: false,
             events: Vec::new(),
             stats: FrameStats::default(),
+            transparent: false,
         }
     }
 
@@ -592,6 +598,11 @@ impl<S: 'static> Runtime<S> {
                 f(&mut self.state as &mut dyn Any, &mut one);
                 true
             }
+            Action::HoverEnd(path) => {
+                let Some(f) = self.node(&path).and_then(|n| n.on_hover_end.clone()) else { return false };
+                f(&mut self.state as &mut dyn Any, &mut one);
+                true
+            }
             Action::Press(path) => {
                 let Some(f) = self.node(&path).and_then(|n| n.on_press.clone()) else { return false };
                 self.events.push(format!("press {path}"));
@@ -697,6 +708,15 @@ impl<S: 'static> Runtime<S> {
             sub(&mut self.state as &mut dyn Any, tx);
         }
         true
+    }
+
+    /// The live node at `path` and where it's drawn (x0, y0, x1, y1 in points): its layout target
+    /// moved by any scroll it sits in, which is where the pointer finds it.
+    fn live(&self, path: &str) -> Option<(usize, [f32; 4])> {
+        let i = self.nodes.iter().enumerate().position(|(i, n)| n.path == path && !self.subtree_exiting(i))?;
+        let n = &self.nodes[i];
+        let r = self.drawn.get(i).copied().filter(|d| d[2] > 0.0 || d[3] > 0.0).map_or(n.target, |d| [d[0], d[1], d[0] + d[2], d[1] + d[3]]);
+        Some((i, r))
     }
 
     fn node(&self, path: &str) -> Option<&Node> {
@@ -1447,11 +1467,12 @@ impl<S: 'static> Runtime<S> {
             .and_then(|(id, _)| self.node_index.get(id).map(|&i| &self.nodes[i]))
             .filter(|n| !self.is_exiting(n.id)).map(|n| n.path.clone());
         if hovered != self.hovered {
+            if let Some(path) = self.hovered.take() { self.queue.push(Action::HoverEnd(path)); }
             if let Some(path) = &hovered { self.queue.push(Action::Hover(path.clone())); }
             self.hovered = hovered;
         }
         let Some((path, d)) = self.capture.clone() else { return };
-        let Some((r, has_drag)) = self.node(&path).map(|n| (n.target, n.on_drag.is_some())) else { return };
+        let Some((r, has_drag)) = self.live(&path).map(|(i, r)| (r, self.nodes[i].on_drag.is_some())) else { return };
         self.capture_inside = x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
         if has_drag {
             let d = Drag { phase: Phase::Move, x: x - r[0], y: y - r[1], ..d };
@@ -1475,7 +1496,7 @@ impl<S: 'static> Runtime<S> {
             self.queue.push(Action::Focus(n.path.clone(), x - r[0] - n.inset[0], y - r[1] - n.inset[1]));
             return;
         }
-        let r = n.target;
+        let r = [r[0], r[1], r[0] + r[2], r[1] + r[3]];
         let d = Drag {
             phase: Phase::Down,
             x: x - r[0],
@@ -1498,7 +1519,7 @@ impl<S: 'static> Runtime<S> {
         self.pointer_move(x, y);
         let Some((path, d)) = self.capture.take() else { return };
         let Some((r, has_drag, has_press)) =
-            self.node(&path).map(|n| (n.target, n.on_drag.is_some(), n.on_press.is_some()))
+            self.live(&path).map(|(i, r)| (r, self.nodes[i].on_drag.is_some(), self.nodes[i].on_press.is_some()))
         else {
             return;
         };
@@ -1514,7 +1535,9 @@ impl<S: 'static> Runtime<S> {
     pub fn pointer_leave(&mut self) {
         if self.capture.is_none() {
             self.pointer = None;
-            self.hovered = None;
+            if let Some(path) = self.hovered.take() {
+                self.queue.push(Action::HoverEnd(path));
+            }
         }
     }
 
@@ -2025,7 +2048,7 @@ impl<S: 'static> Runtime<S> {
                 dy -= grid((st.offset - origin) as f32, s);
             }
             self.inh_scratch[i] = Inh { opacity: o, clip, fade, scale: sc, anchor, blur, dy };
-            if (n.on_press.is_some() || n.on_hover.is_some() || n.on_drag.is_some() || n.input.is_some())
+            if (n.on_press.is_some() || n.on_hover.is_some() || n.on_hover_end.is_some() || n.on_drag.is_some() || n.input.is_some())
                 && !self.subtree_exiting(i)
             {
                 let c = self.inh_scratch[n.parent.unwrap_or(0)].clip;
@@ -2135,10 +2158,17 @@ impl<S: 'static> Runtime<S> {
     }
 
     pub fn clear_color(&self) -> [f32; 4] {
-        self.nodes.first().map_or([0.0, 0.0, 0.0, 1.0], |n| {
+        let opaque = if self.transparent { 0.0 } else { 1.0 };
+        self.nodes.first().map_or([0.0, 0.0, 0.0, opaque], |n| {
             let c = self.color(n.id, P_FILL, n.vis.fill);
-            [c.r, c.g, c.b, 1.0]
+            if self.transparent { [c.r * c.a, c.g * c.a, c.b * c.a, c.a] } else { [c.r, c.g, c.b, 1.0] }
         })
+    }
+
+    /// The current hit targets in points (x0, y0, x1, y1), clipped to their ancestors: where
+    /// pointer input means something. Click-through shells take input only here.
+    pub fn hit_rects(&self) -> impl Iterator<Item = [f32; 4]> + '_ {
+        self.hits.iter().map(|h| h.1)
     }
 }
 
@@ -2281,6 +2311,7 @@ fn flatten(
         children,
         on_press,
         on_hover,
+        on_hover_end,
         above,
         on_drag,
         opacity_motion,
@@ -2307,6 +2338,7 @@ fn flatten(
         text_layout: None,
         on_press,
         on_hover,
+        on_hover_end,
         above,
         on_drag,
         motion,
@@ -2404,6 +2436,76 @@ mod tests {
         assert_eq!(rt.cursor(), Cursor::Default);
         rt.pointer_leave();
         assert_eq!(rt.cursor(), Cursor::Default);
+    }
+
+    #[test]
+    fn right_and_bottom_pins_resolve_against_the_parent() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            crate::el::row().size(400.0, 300.0).child(el().key("spacer").size(100.0, 10.0)).child(
+                el().key("parent").size(84.0, 52.0).child(el().key("pinned").pin(None, None, Some(4.0), Some(4.0)).size(30.0, 16.0)),
+            )
+        }
+        let mut rt = Runtime::new((), view, (400.0, 300.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        let find = |k: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(k)).unwrap().rect;
+        assert_eq!(find("parent"), [100.0, 0.0, 84.0, 52.0]);
+        assert_eq!(find("pinned"), [150.0, 32.0, 30.0, 16.0]);
+    }
+
+    #[test]
+    fn presses_land_on_targets_inside_a_scrolled_viewport() {
+        fn view(_: &Vec<usize>, _: &mut Cx<Vec<usize>>) -> El {
+            let rows = (0..10).map(|i| el().key(format!("row{i}")).w_full().h(50.0).on_press(move |s: &mut Vec<usize>| s.push(i)));
+            col().size(200.0, 100.0).scroll(ScrollSpec { stick_bottom: false }).child(col().w_full().children(rows))
+        }
+        let mut rt = Runtime::new(Vec::new(), view, (200.0, 100.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        rt.pointer_move(100.0, 25.0);
+        rt.wheel(100.0, 25.0, -200.0);
+        for _ in 0..240 {
+            rt.frame(1.0 / 120.0);
+        }
+        // Scrolled by 200: the top of the viewport shows row 4.
+        rt.pointer_move(100.0, 25.0);
+        rt.pointer_down(100.0, 25.0);
+        rt.pointer_up(100.0, 25.0);
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state, [4]);
+    }
+
+    #[test]
+    fn hover_end_fires_when_the_pointer_moves_on_or_leaves() {
+        fn view(_: &Vec<String>, _: &mut Cx<Vec<String>>) -> El {
+            let target = |key: &'static str| {
+                el().key(key)
+                    .size(100.0, 40.0)
+                    .on_hover(move |s: &mut Vec<String>| s.push(format!("enter {key}")))
+                    .on_hover_end(move |s: &mut Vec<String>| s.push(format!("leave {key}")))
+            };
+            col().size(100.0, 120.0).child(target("a")).child(target("b"))
+        }
+        let mut rt = Runtime::new(Vec::new(), view, (100.0, 120.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        assert_eq!(rt.hit_rects().count(), 2, "hover-only targets take input");
+        rt.pointer_move(50.0, 20.0);
+        rt.pointer_move(50.0, 60.0);
+        rt.pointer_move(50.0, 100.0);
+        rt.pointer_move(50.0, 20.0);
+        rt.pointer_leave();
+        rt.frame(1.0 / 120.0);
+        assert_eq!(rt.state, ["enter a", "leave a", "enter b", "leave b", "enter a", "leave a"]);
+    }
+
+    #[test]
+    fn transparent_runtimes_clear_to_the_roots_own_alpha() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            el().size(10.0, 10.0)
+        }
+        let mut rt = Runtime::new((), view, (10.0, 10.0), Env { system_dark: true, scale: 1.0 });
+        rt.frame(0.0);
+        assert_eq!(rt.clear_color()[3], 1.0, "windows stay opaque");
+        rt.transparent = true;
+        assert_eq!(rt.clear_color(), [0.0; 4]);
     }
 
     #[test]
@@ -2747,3 +2849,4 @@ mod tests {
         assert!((r10.rect[1] + r10.rect[3] - 300.0).abs() < 0.05, "{:?}", r10.rect);
     }
 }
+

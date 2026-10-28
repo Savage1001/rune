@@ -53,7 +53,8 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// After an edit, scrolls the focused field's nearest scroll viewport on each axis just far
-    /// enough to show the caret line, as a browser does for a textarea.
+    /// enough to show the caret line, as a browser does for a textarea, leaving the viewport's
+    /// `El::scroll_margin` like CSS `scroll-padding`.
     pub(super) fn follow_caret(&mut self) {
         let Some(i) = self.focused_index() else { return };
         let Some(r) = self.caret_rect(&self.nodes, i) else { return };
@@ -66,7 +67,9 @@ impl<S: 'static> Runtime<S> {
             let start = scroll_offsets(&self.scrolls, &self.nodes, v).fold(self.nodes[v].target[a], |p, o| p - o[a]);
             let view = f64::from(self.nodes[v].target[a + 2] - self.nodes[v].target[a]);
             let (at, len) = (f64::from(r[a] - start), f64::from(r[a + 2]));
-            let delta = if at < 0.0 { at } else if at + len > view { at + len - view } else { continue };
+            let margin = f64::from(self.nodes[v].scroll_edges.margin);
+            let delta = scroll_edge::reveal(0.0, at, len, view, margin);
+            if delta == 0.0 { continue; }
             let stick = self.nodes[v].scroll.is_some_and(|s| s.stick_bottom);
             let Some(st) = self.scrolls.get_mut(&self.nodes[v].id) else { continue };
             if horizontal {
@@ -349,6 +352,36 @@ mod tests {
             rt.key(KeyEvent { key: Key::Down, mods: Mods::default() });
             rt.frame(1.0 / 120.0);
             assert_caret_aligned(&rt, "b160", &format!("down step {step}"));
+        }
+    }
+
+    #[test]
+    fn follow_caret_leaves_the_scroll_margin_clear_until_the_content_ends() {
+        let mut edit = TextEdit::new((0..40).map(|l| format!("line {l}")).collect::<Vec<_>>().join("\n"));
+        edit.focused = true;
+        let mut rt = Runtime::new(edit, |e: &TextEdit, _: &mut Cx<TextEdit>| {
+            col().w_full().h_full().child(
+                col().key("viewport").w_full().h(160.0).scroll(ScrollSpec { stick_bottom: false }).scroll_margin(16.0)
+                    .child(text_input(e, TextStyle::new(13.0, 400.0).lh(20.0)).key("field").w_full().on_edit(|s: &mut TextEdit| s)),
+            )
+        }, (300.0, 400.0), Env::new(true, 2.0));
+        rt.frame(0.0);
+        rt.key(KeyEvent { key: Key::Text("!".into()), mods: Mods::default() });
+        rt.frame(1.0 / 120.0);
+        let rects = |rt: &Runtime<TextEdit>| {
+            let els = rt.elements();
+            let viewport = els.iter().find(|e| e.key.as_deref() == Some("viewport")).unwrap().rect;
+            let caret = els.iter().find(|e| e.key.as_deref() == Some("field")).unwrap().caret.unwrap();
+            (viewport[1], viewport[1] + viewport[3], caret[1], caret[1] + caret[3])
+        };
+        let (_, bottom, _, low) = rects(&rt);
+        assert!((low - bottom).abs() < 1.0, "the last line stops flush with the content's end: {low} vs {bottom}");
+        for step in 0..20 {
+            rt.key(KeyEvent { key: Key::Up, mods: Mods::default() });
+            rt.frame(1.0 / 120.0);
+            let (top, bottom, high, low) = rects(&rt);
+            assert!(high >= top + 16.0 - 0.5, "up {step}: caret top {high} leaves 16 pt under {top}");
+            assert!(low <= bottom + 0.5, "up {step}: caret bottom {low} inside {bottom}");
         }
     }
 }

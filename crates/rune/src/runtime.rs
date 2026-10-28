@@ -5799,8 +5799,9 @@ impl<S: 'static> Runtime<S> {
             if lift {
                 // Keep the destination's clips (consumed ones included) and offsets. Drop its
                 // ancestors' opacity, scale and blur: an entering parent's fade or scale would
-                // otherwise hide the flight or jump it off the rect it was seen at. Inside another
-                // flight, also drop that flight's cover offset and clip.
+                // otherwise hide the flight or jump it off the rect it was seen at. A scale holding
+                // still (an app-wide zoom) stays, so it flies at the size it lands at. Inside
+                // another flight, also drop that flight's cover offset and clip.
                 let [clip, fade, fade_origin] = if self.launches.flying(node_id) {
                     // A launch leaves where its clips don't reach.
                     [crate::render::NO_CLIP, [0.0; 4], pinh.fade_origin]
@@ -5810,8 +5811,9 @@ impl<S: 'static> Runtime<S> {
                         [clip, pinh.fade, pinh.fade_origin]
                     })
                 };
+                let (scale, anchor, anchor_to) = flights::still_scale(&pinh);
                 pinh = Inh { opacity: 1.0, paint_opacity: 1.0, clip, fade, fade_origin, paint_clip: clip, paint_fade: fade,
-                    paint_fade_origin: fade_origin, rounded: None, scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0,
+                    paint_fade_origin: fade_origin, rounded: None, scale, anchor, anchor_to, blur: 0.0,
                     dx: pinh.dx - pinh.cover[0], dy: pinh.dy - pinh.cover[1], cover: [0.0; 2], outer: None,
                     scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, turn: 0, ..pinh };
                 let fix = self.launches.offset_fix(&self.scene, node_id, [pinh.dx, pinh.dy]);

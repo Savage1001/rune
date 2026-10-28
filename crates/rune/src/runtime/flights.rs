@@ -50,6 +50,12 @@ impl Launches {
     }
 }
 
+/// The ancestors' scale a flight keeps under `inh` (scale, anchor, anchor_to): theirs while it
+/// holds still, as an app-wide zoom does, else none, so an entering parent's scale can't move it.
+pub(super) fn still_scale(inh: &Inh) -> (f32, [f32; 2], [f32; 2]) {
+    if inh.scale_motion == ScaleMotion::Still { (inh.scale, inh.anchor, inh.anchor_to) } else { (1.0, [0.0; 2], [0.0; 2]) }
+}
+
 impl<S: 'static> Runtime<S> {
     /// Shared-element motion (`El::matched`): each of the last commit's matched elements that
     /// left the tree hands its geometry, radius, fill and opacity to the element with its id that
@@ -137,15 +143,21 @@ impl<S: 'static> Runtime<S> {
                 let (_, origin) = text_extent(&nodes[j], spec, layout, [r[0], r[1], r[2] - r[0], r[3] - r[1]], scale);
                 Some([origin[0] - t[0], origin[1] - t[1]])
             }).unwrap_or([0.0; 2]);
-            // Scroll offsets live outside the scene: subtract the destination's.
-            let mut shift = [0.0; 2];
-            if self.built {
-                shift = std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
+            // Scroll offsets live outside the scene: subtract the destination's. Under a still
+            // scale, its screen point maps back through it to where it is laid out.
+            let (mut shift, mut zoom) = ([0.0; 2], (1.0, [0.0; 2], [0.0; 2]));
+            if self.built
+                && let Some(h) = std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
                     .find_map(|p| index.get(&nodes[p].id).copied())
-                    .and_then(|k| self.inh_scratch.get(k)).map_or([0.0; 2], |h| [h.dx - h.cover[0], h.dy - h.cover[1]]);
+                    .and_then(|k| self.inh_scratch.get(k))
+            {
+                shift = [h.dx - h.cover[0], h.dy - h.cover[1]];
+                zoom = still_scale(h);
             }
+            let (k, anchor, anchor_to) = zoom;
+            let at = |axis: usize| anchor[axis] + (from[axis] - anchor_to[axis]) / k - rel[axis] - shift[axis];
             let (w, h) = (t[2] - t[0], t[3] - t[1]);
-            let start = MRect::new(from[0] - rel[0] - shift[0], from[1] - rel[1] - shift[1], w, h);
+            let start = MRect::new(at(0), at(1), w, h);
             let spring = tx.motion.unwrap_or(motion::REFLOW);
             self.scene.launch(to, start, LayoutAnim::new(spring).screen());
             self.flying.retain(|f| f.0 != to);

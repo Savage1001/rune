@@ -12,6 +12,8 @@ fn fired(s: &mut State, _: &mut Tx) {
 fn items(enabled: bool, checked: bool) -> Vec<MenuItem<State>> {
     vec![MenuItem::new("Open Quick Panel", fired).id("quick").key_equivalent("cmd+alt+shift+k".parse().unwrap()).enabled(enabled).checked(checked),
         MenuItem::new("Named Quick Panel", fired).id("named").menu("Rune Tools"),
+        MenuItem::separator().menu("Rune Tools"),
+        MenuItem::new("Named Settings", fired).id("named-settings").menu("Rune Tools"),
         MenuItem::new("Dock Quick Panel", fired).id("dock").dock()]
 }
 #[cfg(target_os = "macos")]
@@ -31,6 +33,11 @@ fn native_status() {
         if let Some(item) = quick {
             println!("NATIVE enabled={} checked={}", item.isEnabled(), item.state() == 1);
         } else { println!("NATIVE cleared"); }
+        if let Some(tools) = (0..root.numberOfItems()).filter_map(|i| root.itemAtIndex(i)).find(|i| i.title().to_string() == "Rune Tools").and_then(|i| i.submenu()) {
+            let items: Vec<_> = (0..tools.numberOfItems()).filter_map(|i| tools.itemAtIndex(i)).collect();
+            let separators: Vec<_> = items.iter().enumerate().filter(|(_, i)| i.isSeparatorItem()).map(|(n, _)| n).collect();
+            println!("NAMED items={} separators={separators:?}", items.len());
+        }
         let delegate: *mut objc2::runtime::AnyObject = msg_send![&*app, delegate];
         let responds: bool = msg_send![delegate, respondsToSelector: sel!(applicationDockMenu:)];
         assert!(responds);

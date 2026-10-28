@@ -147,7 +147,10 @@ let app = App::new(spec)
     .menu_item(MenuItem::new("Open Quick Panel", open_panel).id("quick")
         .key_equivalent("cmd+shift+space".parse()?))
     .menu_item(MenuItem::new("Preferences", preferences).menu("Tools"))
-    .menu_item(MenuItem::new("Open Quick Panel", open_panel).id("dock-quick").dock());
+    .menu_item(MenuItem::new("Open Quick Panel", open_panel).id("dock-quick").dock())
+    .menu_item(MenuItem::new("New Window", new_window).menu("File"))
+    .menu_item(MenuItem::separator().menu("File"))
+    .menu_item(MenuItem::new("Close Tab", close_tab).menu("File"));
 
 handle.set_menu([
     MenuItem::new("Open Quick Panel", open_panel).id("quick")
@@ -159,6 +162,9 @@ Actions are `fn(&mut S, &mut Tx)` queued on the app thread. `set_menu` replaces 
 custom items for that App; an empty list removes them. It validates atomically and
 queues installation. `take_menu_errors()` reports deferred startup/installation
 errors. Replaced, disabled or removed items invalidate stale queued actions.
+`MenuItem::separator()` is a separator line (`NSMenuItem.separatorItem` on macOS), placed
+with `menu` or `dock` in list order like any item. It needs no id, takes no part in
+id/title lookup and can't be fired.
 
 On macOS, one App owns the process-wide custom menus. Default Quit/Hide items and
 existing named-menu items are preserved. The Dock adapter adds an absent

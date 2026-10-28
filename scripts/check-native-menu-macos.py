@@ -81,6 +81,7 @@ def main():
             command("status")
             status = reader.until("STATUS")
             assert "NATIVE enabled=true checked=false" in status and "DOCK items=1" in status
+            assert "NAMED items=3 separators=[1]" in status
             # winit labels the default app menu with NSProcessInfo.processName.
             call("invoke_menu", **target, path=[os.path.basename(sys.argv[1]), "Open Quick Panel"])
             reader.until("FIRED 1")

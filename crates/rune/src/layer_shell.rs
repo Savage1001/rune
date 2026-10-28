@@ -35,6 +35,8 @@ struct State {
     input: Vec<Input>,
     surface: Option<WlSurface>,
     pointer_inside: bool,
+    /// The serial of the latest button event over the surface, until `dispatch` records it.
+    press: Option<u32>,
     keyboard_focus: bool,
     want_pointer: bool,
     want_keys: bool,
@@ -78,7 +80,8 @@ impl Dispatch<WlPointer, ()> for State {
                 state.pointer_inside = false;
                 state.input.push(Input::Leave);
             }
-            wl_pointer::Event::Button { button: 0x110, state: wayland_client::WEnum::Value(button), .. } if state.pointer_inside => {
+            wl_pointer::Event::Button { serial, button: 0x110, state: wayland_client::WEnum::Value(button), .. } if state.pointer_inside => {
+                state.press = Some(serial);
                 let pressed = button == wl_pointer::ButtonState::Pressed;
                 state.input.push(Input::Button(pressed));
                 if pressed && let Some(xkb) = &state.xkb {
@@ -197,7 +200,10 @@ pub(crate) struct Changes {
 }
 
 pub(crate) struct LayerSurface {
+    conn: Connection,
     registry: WlRegistry,
+    /// `xdg_activation_v1`, for tokens from presses.
+    activation: Option<u32>,
     seat_global: Option<(u32, u32)>,
     regions: std::cell::RefCell<Option<Vec<[i32; 4]>>>,
     compositor: WlCompositor,
@@ -233,6 +239,7 @@ impl LayerSurface {
         let registry = globals.registry().clone();
         let seat_global = globals.contents().with_list(|list| list.iter().find(|g| g.interface == "wl_seat").map(|g| (g.name, g.version.min(8))));
         let seat = if want_pointer || want_keys { seat_global.map(|(name, version)| registry.bind::<WlSeat, _, _>(name, version, &qh, ())) } else { None };
+        let activation = globals.contents().with_list(|list| list.iter().find(|g| g.interface == "xdg_activation_v1").map(|g| g.name));
         let surface = compositor.create_surface(&qh, ());
         let region = compositor.create_region(&qh, ());
         surface.set_input_region(Some(&region));
@@ -243,7 +250,7 @@ impl LayerSurface {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_exclusive_zone(0);
         let state = State { surface: Some(surface.clone()), want_pointer, want_keys, ..State::default() };
-        let mut this = LayerSurface { registry, seat_global, regions: std::cell::RefCell::new(Some(Vec::new())), compositor, output, seat, options: options.clone(), queue, state, layer, surface, display: display.display };
+        let mut this = LayerSurface { conn, registry, activation, seat_global, regions: std::cell::RefCell::new(Some(Vec::new())), compositor, output, seat, options: options.clone(), queue, state, layer, surface, display: display.display };
         this.place(at);
         this.surface.commit();
         while this.state.configured.is_none() && !this.state.closed {
@@ -347,6 +354,18 @@ impl LayerSurface {
     pub fn dispatch(&mut self) -> Changes {
         let _ = self.queue.dispatch_pending(&mut self.state);
         let _ = self.queue.flush();
+        if let Some(serial) = self.state.press.take()
+            && let (Some(global), Some(seat)) = (self.activation, &self.seat)
+        {
+            crate::activation::pressed(crate::activation::Press {
+                conn: self.conn.clone(),
+                registry: self.registry.clone(),
+                global,
+                seat: seat.clone(),
+                surface: self.surface.clone(),
+                serial,
+            });
+        }
         Changes { size: self.state.configured.take(), input: std::mem::take(&mut self.state.input), scale: self.state.scale.take(), closed: self.state.closed }
     }
 
@@ -365,6 +384,7 @@ impl Drop for LayerSurface {
         if let Some(keyboard) = self.state.keyboard.take() && keyboard.version() >= 3 { keyboard.release(); }
         if let Some(seat) = self.seat.take() && seat.version() >= 5 { seat.release(); }
         if let Some(output) = self.output.take() && output.version() >= 3 { output.release(); }
+        crate::activation::forget(&self.surface);
         self.layer.destroy();
         self.surface.destroy();
         let _ = self.queue.flush();

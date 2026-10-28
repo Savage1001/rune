@@ -1201,7 +1201,7 @@ mod mac {
     use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
     use objc2::{msg_send, sel, ClassType};
     use objc2_app_kit::{NSEvent, NSPanel, NSWindowButton, NSWindowStyleMask};
-    use objc2_foundation::{NSPoint, NSString, NSUserDefaults};
+    use objc2_foundation::{NSString, NSUserDefaults};
     use winit::window::Window;
     use crate::macos::{content_view, ns_window};
 

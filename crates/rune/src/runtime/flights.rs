@@ -123,6 +123,7 @@ impl<S: 'static> Runtime<S> {
         let launches = std::mem::take(&mut self.launches.pending);
         if instant || tx.settle || self.reduced_motion { return; }
         let index: HashMap<NodeId, usize> = self.nodes.iter().enumerate().map(|(k, n)| (n.id, k)).collect();
+        let built: HashMap<NodeId, usize> = self.built_ids.iter().enumerate().map(|(k, &id)| (id, k)).collect();
         let scale = self.env.scale;
         for (target, from) in launches {
             let Some(i) = nodes.iter().position(|n| crate::flight::selects(&target, &n.path, n.key.as_deref())) else { continue };
@@ -144,12 +145,12 @@ impl<S: 'static> Runtime<S> {
                 Some([origin[0] - t[0], origin[1] - t[1]])
             }).unwrap_or([0.0; 2]);
             // Scroll offsets live outside the scene: subtract the destination's. Under a still
-            // scale, its screen point maps back through it to where it is laid out.
+            // scale, its screen point maps back through it to where it is laid out. Both come
+            // from the last build, which a commit earlier in the same frame leaves in place.
             let (mut shift, mut zoom) = ([0.0; 2], (1.0, [0.0; 2], [0.0; 2]));
-            if self.built
-                && let Some(h) = std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
-                    .find_map(|p| index.get(&nodes[p].id).copied())
-                    .and_then(|k| self.inh_scratch.get(k))
+            if let Some(h) = std::iter::successors(nodes[i].parent, |&p| nodes[p].parent)
+                .find_map(|p| built.get(&nodes[p].id).copied())
+                .and_then(|k| self.inh_scratch.get(k))
             {
                 shift = [h.dx - h.cover[0], h.dy - h.cover[1]];
                 zoom = still_scale(h);

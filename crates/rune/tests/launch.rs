@@ -2,13 +2,14 @@
 //! travels one smooth path into its slot in the scroll view.
 use rune::{Cx, El, Env, GrowthSpec, Key, KeyEvent, Runtime, ScrollSpec, TextEdit, TextStyle, Tx, col, text, text_input};
 
-struct State { draft: TextEdit, sent: Vec<String>, relaunch: bool, zoom: f32 }
+struct State { draft: TextEdit, sent: Vec<String>, relaunch: bool, zoom: f32, ticks: u32 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
     let mut rows = col().w_full().growth(GrowthSpec::default());
     for (i, m) in s.sent.iter().enumerate() {
         rows = rows.child(col().key(format!("msg-{i}")).w_full().py(8.0).items_end().child(text(m.clone()).key("body")));
     }
+    rows = rows.child(text(format!("{}", s.ticks)).key("ticks"));
     let page = col().w_full().h_full()
         .child(col().key("scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: true }).child(rows))
         .child(text_input(&s.draft, TextStyle::new(14.0, 400.0)).key("composer").w_full().h(60.0)
@@ -32,7 +33,7 @@ fn app_at(relaunch: bool, zoom: f32) -> Runtime<State> {
     let mut draft = TextEdit::new("third");
     draft.focused = true;
     let sent = vec!["first".to_string(), "second".to_string()];
-    let mut rt = Runtime::new(State { draft, sent, relaunch, zoom }, view, (400.0, 300.0), Env::new(true, 2.0));
+    let mut rt = Runtime::new(State { draft, sent, relaunch, zoom, ticks: 0 }, view, (400.0, 300.0), Env::new(true, 2.0));
     rt.frame(0.0);
     rt
 }
@@ -137,5 +138,24 @@ fn a_launch_under_a_scaled_ancestor_flies_at_its_drawn_size() {
             assert!((w[1] - w[0]) * total.signum() >= -0.01, "axis {axis} turns back: {at:?}");
             assert!((w[1] - w[0]).abs() <= total.abs().max(20.0) / 10.0, "axis {axis} snaps: {at:?}");
         }
+    }
+}
+
+#[test]
+fn a_launch_after_another_commit_in_its_frame_still_leaves_from_the_source() {
+    // Something else changes state in the frame Enter lands in, as a server event or a cleared
+    // attachment does: that commit comes first, and the launch must still map through the zoom.
+    let zoom = 1.6;
+    let mut rt = app_at(false, zoom);
+    let composer = rect(&rt, "composer", None).0;
+    rt.update(|s, _| s.ticks += 1);
+    let frames = send(&mut rt);
+    let (first, _) = frames[0];
+    assert!((first[0] - composer[0]).abs() < 6.0 * zoom && first[1] >= composer[1] - 3.0 && first[1] + first[3] <= composer[1] + composer[3] + 3.0,
+        "the first frame's text sits on the composer's: {first:?} in {composer:?}");
+    for axis in 0..2 {
+        let at: Vec<f32> = frames.iter().map(|(r, _)| r[axis]).collect();
+        let total = at[at.len() - 1] - at[0];
+        assert!(at.windows(2).all(|w| (w[1] - w[0]) * total.signum() >= -0.01), "axis {axis} turns back: {at:?}");
     }
 }

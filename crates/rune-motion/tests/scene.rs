@@ -447,3 +447,18 @@ fn a_frozen_ancestor_holds_screen_travel_without_frames() {
     assert!(!s.frame_at(t + 3.1).animating);
     assert_eq!(seen.last().unwrap().1.rect.origin(), Vec2::new(300.0, 300.0));
 }
+
+#[test]
+fn a_trailing_child_rests_where_its_parent_does() {
+    let (p, c) = (NodeId(1), NodeId(2));
+    let mut s = Scene::new();
+    s.insert(p, spec(0.0, 0.0, 40.0, 20.0), Mount::Initial);
+    s.insert(c, spec(30.0, 4.0, 6.0, 6.0).parent(p), Mount::Initial);
+    s.set_ride_trailing(c, true);
+    s.frame_at(0.0);
+    s.set_frame(p, Rect::new(0.0, 0.0, 70.0, 20.0), Spring::new(0.3, 0.0));
+    s.frame_at(0.05);
+    let (shown, rest) = (s.presented(c).unwrap(), s.rest(c));
+    assert!(shown.rect.x > 30.0 && shown.rect.x < 60.0, "{:?}", shown.rect);
+    assert_eq!(rest, Some(Rect::new(60.0, 4.0, 6.0, 6.0)), "the child comes to rest against the parent's new edge");
+}

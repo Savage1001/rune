@@ -261,6 +261,19 @@ struct Node {
     last: Option<Presented>,
 }
 
+/// Where a node comes to rest (see [`Scene::rest`]), beside `Scene::nodes` so the nodes the
+/// renderer reads every frame stay the same size.
+#[derive(Clone, Copy)]
+struct Rest {
+    /// Root-space presented rect with every track at its target, and the origin children rest on.
+    rect: Rect,
+    origin: Vec2,
+    /// `rect` differs from where the node is this frame.
+    moving: bool,
+}
+
+const REST_ZERO: Rest = Rest { rect: Rect::ZERO, origin: Vec2::ZERO, moving: false };
+
 /// A small dual number: value and time derivative, for exact velocity of composed geometry.
 #[derive(Clone, Copy, Default)]
 struct D {
@@ -286,6 +299,7 @@ impl D {
 pub struct Scene {
     store: AnimationStore,
     nodes: Vec<Node>,
+    rests: Vec<Rest>,
     free: Vec<u32>,
     index: FxMap<u64, u32>,
     root_head: u32,
@@ -316,6 +330,7 @@ impl Scene {
         Scene {
             store: AnimationStore::new(),
             nodes: Vec::new(),
+            rests: Vec::new(),
             free: Vec::new(),
             index: FxMap::default(),
             root_head: NONE,
@@ -419,6 +434,14 @@ impl Scene {
     pub fn presented(&self, id: NodeId) -> Option<Presented> {
         self.slot(id).and_then(|i| self.nodes[i].last)
     }
+    /// The rect the node comes to rest at once every track (its own and its ancestors') reaches
+    /// its target, snapped like [`Presented::rect`], while that differs from where it is: the
+    /// difference from [`presented`](Self::presented) is the motion still in flight. Only a
+    /// node whose [`Presented::flags`] has `ANIMATED` or `ANCESTOR_ANIMATED` can be moving.
+    pub fn rest(&self, id: NodeId) -> Option<Rect> {
+        let r = &self.rests[self.slot(id)?];
+        r.moving.then(|| snap_rect(r.rect, self.store.pixel_scale()))
+    }
     /// Root-space layout rect this frame (without this node's own offset or presence offset),
     /// snapped to the same 1/64 device-px grid as [`Presented::rect`].
     pub fn world(&self, id: NodeId) -> Option<Rect> {
@@ -503,10 +526,12 @@ impl Scene {
         let i = match self.free.pop() {
             Some(i) => {
                 self.nodes[i as usize] = node;
+                self.rests[i as usize] = REST_ZERO;
                 i
             }
             None => {
                 self.nodes.push(node);
+                self.rests.push(REST_ZERO);
                 (self.nodes.len() - 1) as u32
             }
         };
@@ -1079,6 +1104,38 @@ impl Scene {
         self.nodes[i].tracks[p.0 as usize].and_then(|t| self.store.values_of(t))
     }
 
+    fn targets<const N: usize>(&self, i: usize, p: PropId) -> Option<[f32; N]> {
+        let mut out = [0.0; N];
+        let t = self.nodes[i].tracks[p.0 as usize]?;
+        self.store.targets_of(t, &mut out).then_some(out)
+    }
+
+    /// Where `compute` would put node `i` with every track at its target. It repeats the same
+    /// arithmetic so that, at rest, the two rects are bit-identical.
+    fn rest_of(&self, i: usize, reduced: bool) -> Rect {
+        let n = &self.nodes[i];
+        let parent = n.parent;
+        let world = match n.path {
+            Some(path) => {
+                let p = self.targets::<2>(i, prop::TRAVEL.id).unwrap_or([1.0, 1.0]);
+                let s = path.start.edges();
+                let e = path.end_local.translated(self.parent_target_origin(i)).edges();
+                let ed: [f32; 4] = core::array::from_fn(|k| s[k] + (e[k] - s[k]) * p[k % 2]);
+                Rect::from_edges(ed[0], ed[1], ed[2], ed[3])
+            }
+            None => {
+                let origin = if parent == NONE { Vec2::ZERO } else { self.rests[parent as usize].origin };
+                let local = self.targets::<4>(i, prop::FRAME.id).map_or(n.frame, |v| Rect::read_lanes(&v));
+                local.translated(origin)
+            }
+        };
+        let p = self.targets::<1>(i, prop::PRESENCE.id).map_or(1.0, |v| v[0]);
+        let s = lerp_fx(&n.fx_a, &n.fx_b, p);
+        let s = if reduced { [s[0], 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] } else { s };
+        let own = self.targets::<2>(i, prop::OFFSET.id).map_or(Vec2::ZERO, |v| Vec2::read_lanes(&v));
+        world.translated(Vec2::new(own.x + s[2] + s[4] * world.w, own.y + s[3] + s[5] * world.h))
+    }
+
     fn compute(&mut self, i: usize, scale: f32, reduced: bool, own_dirty: bool, parent_dirty: bool) -> Presented {
         let parent = self.nodes[i].parent;
         let parent_origin = if parent == NONE { Vec2::ZERO } else { self.nodes[parent as usize].origin };
@@ -1182,9 +1239,17 @@ impl Scene {
             in_flow,
             flags: fl,
         };
+        // Where it is is where it rests while nothing that places it is in flight. A node riding
+        // its parent's trailing edge also moves with the parent's width.
+        let still = !self.nodes[i].ride_trailing
+            && (parent == NONE || self.rests[parent as usize].origin == self.nodes[parent as usize].origin) && [prop::TRAVEL.id, prop::FRAME.id, prop::PRESENCE.id, prop::OFFSET.id]
+            .iter()
+            .all(|p| self.nodes[i].tracks[p.0 as usize].is_none_or(|t| self.store.is_settled(t)));
+        let rest = if still { shown } else { self.rest_of(i, reduced) };
         let n = &mut self.nodes[i];
         n.world = world;
         n.origin = Vec2::new(shown.x, shown.y);
+        self.rests[i] = Rest { rect: rest, origin: Vec2::new(rest.x, rest.y), moving: rest != shown };
         out
     }
 

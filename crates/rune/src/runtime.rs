@@ -149,6 +149,7 @@ use action::*;
 mod bands;
 #[path = "runtime/paint_slots.rs"]
 mod paint_slots;
+mod pixel_snap;
 #[path = "runtime/shape_paint.rs"]
 mod shape_paint;
 use shape_paint::push_shape;
@@ -190,6 +191,8 @@ mod selection_api_tests;
 #[cfg(test)]
 #[path = "runtime/anchored_grow_tests.rs"]
 mod anchored_grow_tests;
+#[cfg(test)]
+mod pixel_snap_tests;
 
 /// Seconds after a commit before debug builds check a `Tx::live_only` event (`skip_view`).
 #[cfg(debug_assertions)]
@@ -684,6 +687,11 @@ struct Inh {
     /// Ancestors' `El::rotate` layers, composed, as an index into `turn_scratch` plus one
     /// (0: none): where this subtree's device pixels land. An index keeps `Inh` small.
     turn: u32,
+    /// `El::pixel_snap(false)` above, or a turn: this subtree draws at its exact edges.
+    snap_off: bool,
+    /// The translation in points from scrolls, sticky shifts and growth rows above, which
+    /// snaps as a whole (`pixel_snap`).
+    snap_rigid: [f32; 2],
 }
 
 /// A 2×3 affine in device pixels, `[a, b, c, d, tx, ty]`: `(x, y)` lands at
@@ -866,7 +874,7 @@ impl Default for Inh {
         Inh { opacity: 1.0, paint_opacity: 1.0, clip: NO_CLIP, fade: [0.0; 4], fade_origin: NO_CLIP,
             paint_clip: NO_CLIP, paint_fade: [0.0; 4], paint_fade_origin: NO_CLIP, rounded: None,
             scale: 1.0, anchor: [0.0; 2], anchor_to: [0.0; 2], blur: 0.0, dy: 0.0, dx: 0.0, cover: [0.0; 2], outer: None, mark: 0, group: 0.0,
-            scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, turn: 0 }
+            scale_motion: ScaleMotion::Still, in_cache: false, skip_paint: false, turn: 0, snap_off: false, snap_rigid: [0.0; 2] }
     }
 }
 
@@ -1053,6 +1061,7 @@ pub struct Runtime<S: 'static> {
     flying: Vec<(NodeId, MRect)>,
     /// `Tx::launch` flights, waiting for their commit or in the air.
     launches: flights::Launches,
+    pixel_snap: pixel_snap::Glides,
     /// `inh_scratch` and `row_dy` index `nodes`: no commit since the last build.
     built: bool,
     /// The node ids the last build indexed its scratch by.
@@ -1511,6 +1520,7 @@ impl<S: 'static> Runtime<S> {
             reveals: HashMap::new(),
             flights: Vec::new(),
             launches: Default::default(),
+            pixel_snap: Default::default(),
             row_dy: Vec::new(),
             row_h: Vec::new(),
             row_mask: Vec::new(),
@@ -5653,6 +5663,7 @@ impl<S: 'static> Runtime<S> {
         });
         let default_ring = self.default_ring_owner();
         let mut active_cache: Option<ActiveCache> = None;
+        self.pixel_snap.begin_frame();
         for paint_index in 0..n_nodes {
             let i = if tree_order { self.layer_paint_order[paint_index] } else { paint_index };
             let node_id = self.nodes[i].id;
@@ -5686,6 +5697,7 @@ impl<S: 'static> Runtime<S> {
             let Some(p) = self.scene.presented(n.id) else { continue };
             let mut pinh = n.parent.map_or(Inh::default(), |pr| self.inh_scratch[pr]);
             pinh.dy += self.row_dy[i];
+            pinh.snap_rigid[1] += self.row_dy[i];
             if let Some(a) = &n.above
                 && let Some(j) = self.nodes[..i].iter().position(|n| n.key.as_ref() == Some(&a.key))
             {
@@ -5701,6 +5713,7 @@ impl<S: 'static> Runtime<S> {
                 let w = self.scene.world(n.id).unwrap_or(p.rect);
                 pinh.dx = ax - w.x;
                 pinh.dy = ay - w.y;
+                pinh.snap_rigid = [0.0; 2];
                 pinh.scale = 1.0;
                 pinh.anchor = [0.0; 2];
                 pinh.anchor_to = [0.0; 2];
@@ -5734,6 +5747,7 @@ impl<S: 'static> Runtime<S> {
                 let shift = sticky::shift(edge, if tail { inset - h } else { inset }, [top, top + h, left, left + p.rect.w], frame);
                 self.stuck[i] = shift;
                 if edge == crate::el::StickyEdge::Left { pinh.dx += shift } else { pinh.dy += shift }
+                pinh.snap_rigid[(edge != crate::el::StickyEdge::Left) as usize] += shift;
                 // A sticky element stays crisp against the viewport edge it sticks to while rows
                 // scrolling under its fill fade out.
                 let slot = match edge {
@@ -5950,7 +5964,26 @@ impl<S: 'static> Runtime<S> {
                 let k = (pw / n.local.w).max(ph / n.local.h).max(1e-3);
                 Some((k, [(pw - n.local.w * k) * 0.5, (ph - n.local.h * k) * 0.5]))
             } else { None };
-            let r = rect_pt.map(snap_px);
+            let r_exact = rect_pt.map(snap_px);
+            // A node the visibility test below culls paints nothing, and any clip it hands down is
+            // off screen too, so it keeps its exact edges.
+            let snaps = !pinh.snap_off && !n.vis.no_pixel_snap && p.transform.rotate == 0.0 && (pinh.in_cache || {
+                let m = filter_margin + 2.0;
+                r_exact[2].max(r_exact[0]) >= clip[0].max(vp[0]) - m && r_exact[0] <= clip[2].min(vp[2]) + m
+                    && r_exact[3].max(r_exact[1]) >= clip[1].max(vp[1]) - m && r_exact[1] <= clip[3].min(vp[3]) + m
+            });
+            let unscaled = (sc - 1.0).abs() <= 1e-5 && anchor == anchor_to;
+            let animating = p.flags & (rune_motion::flags::ANIMATED | rune_motion::flags::ANCESTOR_ANIMATED) != 0;
+            let rest = if snaps && animating { self.scene.rest(n.id) } else { None };
+            let r = if !snaps {
+                r_exact
+            } else if rest.is_none() && unscaled {
+                self.pixel_snap.at_rest(n.id, r_exact, pinh.snap_rigid.map(|v| v * s))
+            } else {
+                let motion = pixel_snap::motion(&p, rest, s, n.above.is_some(), self.row_h[i] >= 0.0);
+                let raw = if unscaled { r_exact } else { raw_edges.map(snap_px) };
+                self.pixel_snap.snapped(n.id, motion, (r_exact, raw), pinh.snap_rigid.map(|v| v * s))
+            };
             let (w, h) = ((r[2] - r[0]).max(0.0), (r[3] - r[1]).max(0.0));
             let intersect = |a: [f32; 4], b: [f32; 4]| [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
             // `El::rotate`: this subtree draws into a layer turned about its origin.
@@ -5977,7 +6010,7 @@ impl<S: 'static> Runtime<S> {
                 pinh.fade_origin = NO_CLIP;
             }
             // Where the node shows on screen, upright: the turned box's bounds.
-            let mut screen_r = [r[0], r[1], r[0] + w, r[1] + h];
+            let mut screen_r = [r_exact[0], r_exact[1], r_exact[2].max(r_exact[0]), r_exact[3].max(r_exact[1])];
             if let Some(t) = node_turn { screen_r = t.bbox(screen_r); }
             self.drawn[i] = [screen_r[0] / s, screen_r[1] / s, (screen_r[2] - screen_r[0]) / s, (screen_r[3] - screen_r[1]) / s];
             if cover.is_none() { self.drawn_scale[i] = sc; }
@@ -6983,21 +7016,25 @@ impl<S: 'static> Runtime<S> {
                 inherit_fade(&mut fade, &mut fade_origin, r, [0.0, 0.0, 0.0, mask * s]);
             }
             let mut dy = pinh.dy;
+            let snap_off = pinh.snap_off || n.vis.no_pixel_snap || turn_index != 0;
+            let mut snap_rigid = pinh.snap_rigid;
             if n.scroll.is_some()
                 && let Some(st) = self.scrolls.get(&n.id)
             {
                 let offset = self.stuck_offset(i, p.rect.edges()[3]).unwrap_or(st.offset);
                 let held = self.bottom_offset(i, p.rect.edges()[3]).is_some_and(|b| (offset - b).abs() < 0.5);
                 dy -= grid(offset as f32 + st.slack.height(), s);
+                snap_rigid[1] -= grid(offset as f32 + st.slack.height(), s);
                 if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) { st.held = held; }
             }
             let (mut scale, mut anchor, mut anchor_to, mut dx) = (sc, anchor, anchor_to, pinh.dx);
             if n.scroll_axes.x() && let Some(st) = self.scrolls.get(&n.id) {
                 dx -= grid(st.x.offset as f32, s);
+                snap_rigid[0] -= grid(st.x.offset as f32, s);
             }
             if open_cache && sc > 1e-4 {
-                dx += (r[0] / s - rect_pt[0]) / sc;
-                dy += (r[1] / s - rect_pt[1]) / sc;
+                dx += (r_exact[0] / s - rect_pt[0]) / sc;
+                dy += (r_exact[1] / s - rect_pt[1]) / sc;
             }
             let (mut cover_offset, mut outer) = (pinh.cover, pinh.outer);
             if let Some((k, c)) = cover {
@@ -7025,7 +7062,7 @@ impl<S: 'static> Runtime<S> {
                 paint_clip: clip, paint_fade: fade, paint_fade_origin: fade_origin, rounded, scale, anchor, anchor_to, blur, dy, dx,
                 cover: cover_offset, outer, mark, group,
                 scale_motion: if cover.is_some() { ScaleMotion::Moving } else { scale_motion },
-                in_cache, skip_paint, turn: turn_index };
+                in_cache, skip_paint, turn: turn_index, snap_off, snap_rigid };
             let hits_before = self.hits.len();
             if (n.vis.hit || n.on_pointer_move.is_some() || n.on_press.is_some() || n.on_double_press.is_some() || n.on_secondary_press.is_some() || n.on_hover.is_some() || n.on_hover_change.is_some() || n.on_drag.is_some() || n.drag_out.is_some() || n.input.is_some() || n.role == "textbox" || n.window_drag || n.focus.enabled || n.modal.is_some()
                 || n.text.as_ref().is_some_and(|t| t.selectable) || n.gestures.as_ref().is_some_and(|g| g.takes_gestures()))

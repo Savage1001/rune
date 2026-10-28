@@ -619,6 +619,8 @@ pub struct Visual {
     pub(crate) offset_motion: Option<Anim>,
     /// `El::raise`: paints and takes input above the rest of the window.
     pub(crate) raise: bool,
+    /// `El::pixel_snap(false)`: this subtree paints at its exact fractional rects.
+    pub(crate) no_pixel_snap: bool,
     /// The curve `El::scale` changes on.
     pub(crate) scale_motion: Option<Box<Anim>>,
     /// `El::origin`: the unit point scale and rotation pivot about; `None` is the centre.
@@ -678,6 +680,7 @@ impl Default for Visual {
             offset: [0.0; 2],
             offset_motion: None,
             raise: false,
+            no_pixel_snap: false,
             scale_motion: None,
             origin: None,
             rotate: 0.0,

@@ -789,6 +789,20 @@ impl AnimationStore {
         self.contains(id).then(|| self.lane_values(id.index as usize))
     }
 
+    /// Where each lane of a track comes to rest (its latest target, delayed ones included),
+    /// into `out`. False when the track is gone.
+    pub(crate) fn targets_of(&self, id: TrackId, out: &mut [f32]) -> bool {
+        if !self.contains(id) {
+            return false;
+        }
+        let t = id.index as usize;
+        let l0 = self.t_lane0[t] as usize;
+        for (k, slot) in out.iter_mut().enumerate().take(self.t_n[t] as usize) {
+            *slot = self.final_target(l0 + k);
+        }
+        true
+    }
+
     /// The velocities at the last tick for a track, as raw lanes.
     pub fn velocities_of(&self, id: TrackId) -> Option<&[f32]> {
         self.contains(id).then(|| self.lane_velocities(id.index as usize))

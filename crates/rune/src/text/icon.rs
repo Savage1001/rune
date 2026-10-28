@@ -1,4 +1,5 @@
-//! Icons: a subset of SVG (path, rect, circle, ellipse, line; fill/stroke, caps, joins, evenodd).
+//! Icons: a subset of SVG (path, rect, circle, ellipse, line; fill/stroke, caps, joins, evenodd,
+//! and `opacity`, `fill-opacity`, `stroke-opacity` on each element).
 
 use swash::zeno::{Cap, Fill, Join, Mask, Stroke, Transform};
 
@@ -98,7 +99,9 @@ pub fn icon_coverage(icon: &Icon, px: u32) -> Vec<u8> {
         let d = svg_path::parse(&d);
         let stroke = attr(el, "stroke").is_some_and(|v| v != "none");
         let fill = attr(el, "fill").map_or(!stroke, |v| v != "none");
-        let mut paint = |style: swash::zeno::Style<'_>| {
+        let opacity = |name: &str| attr(el, name).and_then(|v| v.trim().parse::<f32>().ok()).map_or(1.0, |v| v.clamp(0.0, 1.0));
+        let whole = opacity("opacity");
+        let mut paint = |style: swash::zeno::Style<'_>, alpha: f32| {
             buf.iter_mut().for_each(|b| *b = 0);
             Mask::new(d.as_slice())
                 .style(style)
@@ -106,13 +109,13 @@ pub fn icon_coverage(icon: &Icon, px: u32) -> Vec<u8> {
                 .size(px, px)
                 .render_into(&mut buf, None);
             for (a, &b) in acc.iter_mut().zip(buf.iter()) {
-                let (fa, fb) = (*a as u32, b as u32);
+                let (fa, fb) = (*a as u32, (b as f32 * alpha).round() as u32);
                 *a = (fa + fb - fa * fb / 255).min(255) as u8;
             }
         };
         if fill {
             let rule = if attr(el, "fill-rule") == Some("evenodd") { Fill::EvenOdd } else { Fill::NonZero };
-            paint(rule.into());
+            paint(rule.into(), whole * opacity("fill-opacity"));
         }
         if stroke {
             let w = attr(el, "stroke-width").and_then(|v| v.parse().ok()).unwrap_or(1.0f32);
@@ -128,9 +131,13 @@ pub fn icon_coverage(icon: &Icon, px: u32) -> Vec<u8> {
                 Some("bevel") => Join::Bevel,
                 _ => Join::Miter,
             });
-            paint(st.into());
+            paint(st.into(), whole * opacity("stroke-opacity"));
         }
     }
     acc
 }
 
+
+#[cfg(test)]
+#[path = "icon_tests.rs"]
+mod tests;

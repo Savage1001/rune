@@ -10,13 +10,21 @@
 //! image keeps its size in points. winit makes those only with the event loop at hand, so a
 //! window's first use of an image waits for [`make_pending`] before the loop sleeps. On macOS
 //! winit would size the image in pixels, twice too big on Retina, so `macos_cursor` sets it.
+//! With the window's cursor rects off, nothing in AppKit puts the image back once the system
+//! shows another cursor (a window coming or going over the pointer, another app's click-through
+//! overlay), so while it holds the pointer the host sets it again every [`REASSERT`], frame or
+//! no frame.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{CursorIcon, CustomCursor, Window};
 
 use crate::el::Cursor;
+
+/// How often an image cursor is set again while it holds the pointer and nothing redraws.
+pub(crate) const REASSERT: Duration = Duration::from_millis(50);
 
 pub(crate) struct OsCursor {
     applied: (bool, Cursor),
@@ -40,8 +48,7 @@ impl OsCursor {
         let scale = image_scale(window);
         let rescaled = active && matches!(want, Cursor::Image(_)) && std::mem::replace(&mut self.scale, scale) != scale;
         let Some(next) = next(&mut self.applied, want, active).or(rescaled.then_some(want)) else {
-            #[cfg(target_os = "macos")]
-            if let (true, Cursor::Image(image)) = self.applied { crate::macos_cursor::reassert(image); }
+            self.reassert();
             return;
         };
         #[cfg(target_os = "macos")]
@@ -55,6 +62,21 @@ impl OsCursor {
             other => window.set_cursor(icon(other)),
         }
     }
+
+    /// When to set the image cursor again: while one holds the pointer, on macOS.
+    pub(crate) fn reassert_at(&self, now: Instant) -> Option<Instant> {
+        (cfg!(target_os = "macos") && holds_image(self.applied)).then(|| now + REASSERT)
+    }
+
+    /// Sets the image cursor again, if one holds the pointer.
+    pub(crate) fn reassert(&self) {
+        #[cfg(target_os = "macos")]
+        if let (true, Cursor::Image(image)) = self.applied { crate::macos_cursor::reassert(image); }
+    }
+}
+
+fn holds_image(applied: (bool, Cursor)) -> bool {
+    matches!(applied, (true, Cursor::Image(_)))
 }
 
 /// Pixels per point in the OS cursors made for `window`.
@@ -156,5 +178,18 @@ mod tests {
         assert_eq!(next(&mut applied, Cursor::Pointer, false), None);
         assert_eq!(next(&mut applied, Cursor::Default, true), Some(Cursor::Default), "entering claims the cursor");
         assert_eq!(next(&mut applied, Cursor::Default, true), None);
+    }
+
+    #[test]
+    fn only_an_image_holding_the_pointer_is_set_again() {
+        static PNG: [u8; 4] = [1, 2, 3, 4];
+        let image = Cursor::Image(crate::cursor::CursorImage::png(&PNG, [0.0, 0.0]));
+        let mut applied = (false, Cursor::Default);
+        next(&mut applied, image, true);
+        assert!(holds_image(applied));
+        next(&mut applied, image, false);
+        assert!(!holds_image(applied), "not once the pointer leaves");
+        next(&mut applied, Cursor::Crosshair, true);
+        assert!(!holds_image(applied), "nor for a system shape, which the window's cursor rects keep");
     }
 }

@@ -2305,6 +2305,7 @@ impl<S: 'static> AnyHost for Host<S> {
         #[cfg(target_os = "macos")]
         if let Some(shadow) = self.win.as_ref().and_then(|w| w.shadow.as_ref()) { shadow.turn(); }
         self.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll), crate::surface_stats::slept(cause));
+        if matches!(cause, StartCause::ResumeTimeReached { .. }) && let Some(w) = &self.win { w.cursor.reassert(); }
         if let Some(w) = &mut self.win && let Some((retry, until)) = w.first_frame.deadline && retry <= Instant::now() {
             if until <= Instant::now() {
                 let notified = w.first_frame.notified;
@@ -2383,6 +2384,7 @@ impl<S: 'static> AnyHost for Host<S> {
             .chain(win.and_then(|w| w.retry))
             .chain(win.filter(|w| !w.visible).and_then(|w| w.hidden_pace.deadline()))
             .chain(self.files.pointer.as_ref().filter(|_| win.is_some_and(|w| w.visible)).map(|_| Instant::now() + DROP_SAMPLE))
+            .chain(win.filter(|w| w.visible).and_then(|w| w.cursor.reassert_at(Instant::now())))
             .min()
     }
 

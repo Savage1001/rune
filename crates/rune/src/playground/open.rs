@@ -82,4 +82,18 @@ impl Tx {
     pub fn open_playground_at(&mut self, story: &str, variant: Option<&str>) {
         self.playground.push(Request::OpenAt(story.to_owned(), variant.map(str::to_owned)));
     }
+
+    /// Makes the open story's stage again and runs its `'r'` trigger, as R does. After
+    /// [`Tx::open_playground_at`] in the same handler it applies to the story that opens.
+    /// With the playground closed, nothing happens.
+    pub fn replay_playground(&mut self) {
+        self.playground.push(Request::Replay);
+    }
+
+    /// Runs the open story's trigger on `key`, as its letter or its side-column button does;
+    /// `'r'` is [`Tx::replay_playground`]. A key the story has no trigger on does nothing.
+    pub fn playground_trigger(&mut self, key: char) {
+        let key = key.to_ascii_lowercase();
+        self.playground.push(if key == 'r' { Request::Replay } else { Request::Trigger(key) });
+    }
 }

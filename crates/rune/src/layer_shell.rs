@@ -3,7 +3,11 @@
 //! input regions and the rendered buffer share a commit. Global pointer observation and
 //! capture exclusion are unavailable. wgpu draws through the raw `wl_surface`.
 
+use std::os::fd::{AsRawFd, RawFd};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use winit::raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 use wayland_backend::client::Backend;
@@ -19,6 +23,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{self
 
 use crate::el::Align;
 use crate::overlay::{Placement, ScreenEdge};
+use crate::runtime::Waker;
 use crate::{OverlayInput, OverlayOptions, OverlayPlacement};
 
 pub(crate) enum Input {
@@ -191,6 +196,47 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
     }
 }
 
+/// Wakes the event loop when the compositor writes to the display. winit turns its loop only
+/// for its own queue's events, so input for this surface's queue (a click on an idle overlay)
+/// would otherwise wait for an unrelated wake.
+struct Watch {
+    stop: Arc<AtomicBool>,
+    /// How many times the overlay has dispatched, so the watcher waits for the loop to read
+    /// what woke it instead of spinning on a socket that stays readable until then.
+    turns: Arc<(Mutex<u64>, Condvar)>,
+}
+
+impl Watch {
+    fn spawn(fd: RawFd, wake: Waker) -> Watch {
+        let stop = Arc::new(AtomicBool::new(false));
+        let turns = Arc::new((Mutex::new(0u64), Condvar::new()));
+        let (stopped, seen) = (stop.clone(), turns.clone());
+        let _ = std::thread::Builder::new().name("rune-layer-watch".into()).spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                // SAFETY: one pollfd for winit's display socket, which outlives the event loop.
+                if unsafe { libc::poll(&mut poll, 1, 250) } <= 0 { continue; }
+                let (count, turned) = &*seen;
+                let before = *count.lock().unwrap();
+                wake();
+                let _ = turned.wait_timeout_while(count.lock().unwrap(), Duration::from_millis(100), |n| *n == before);
+            }
+        });
+        Watch { stop, turns }
+    }
+
+    fn turned(&self) {
+        let (count, turned) = &*self.turns;
+        *count.lock().unwrap() += 1;
+        turned.notify_all();
+    }
+}
+
+impl Drop for Watch {
+    /// The thread notices within one poll timeout; joining would stall hiding.
+    fn drop(&mut self) { self.stop.store(true, Ordering::Relaxed); }
+}
+
 /// What the overlay needs to know after the compositor talked to the surface.
 pub(crate) struct Changes {
     pub size: Option<(u32, u32)>,
@@ -215,11 +261,12 @@ pub(crate) struct LayerSurface {
     layer: ZwlrLayerSurfaceV1,
     surface: WlSurface,
     display: NonNull<std::ffi::c_void>,
+    watch: Option<Watch>,
 }
 
 impl LayerSurface {
     /// None when the display isn't Wayland or the compositor lacks layer-shell.
-    pub fn new(display: RawDisplayHandle, namespace: &str, at: Placement, interactive: bool, options: &OverlayOptions, output_id: Option<u32>) -> Option<LayerSurface> {
+    pub fn new(display: RawDisplayHandle, namespace: &str, at: Placement, interactive: bool, options: &OverlayOptions, output_id: Option<u32>, wake: Option<Waker>) -> Option<LayerSurface> {
         let RawDisplayHandle::Wayland(display) = display else { return None };
         // SAFETY: winit owns this `wl_display` for the life of the event loop, which outlives
         // every overlay; a foreign backend never closes it.
@@ -250,7 +297,8 @@ impl LayerSurface {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_exclusive_zone(0);
         let state = State { surface: Some(surface.clone()), want_pointer, want_keys, ..State::default() };
-        let mut this = LayerSurface { conn, registry, activation, seat_global, regions: std::cell::RefCell::new(Some(Vec::new())), compositor, output, seat, options: options.clone(), queue, state, layer, surface, display: display.display };
+        let watch = wake.map(|wake| Watch::spawn(conn.backend().poll_fd().as_raw_fd(), wake));
+        let mut this = LayerSurface { conn, registry, activation, seat_global, regions: std::cell::RefCell::new(Some(Vec::new())), compositor, output, seat, options: options.clone(), queue, state, layer, surface, display: display.display, watch };
         this.place(at);
         this.surface.commit();
         while this.state.configured.is_none() && !this.state.closed {
@@ -354,6 +402,7 @@ impl LayerSurface {
     pub fn dispatch(&mut self) -> Changes {
         let _ = self.queue.dispatch_pending(&mut self.state);
         let _ = self.queue.flush();
+        if let Some(watch) = &self.watch { watch.turned(); }
         if let Some(serial) = self.state.press.take()
             && let (Some(global), Some(seat)) = (self.activation, &self.seat)
         {

@@ -38,6 +38,7 @@ mod svg_path;
 mod trak;
 pub use case::TextCase;
 pub use measure::{TextInk, advance, ink, measure};
+pub use rich_layout::RichLayoutOptions;
 pub(crate) use case::Source as CaseSource;
 
 use fallback::Route;

@@ -1053,7 +1053,9 @@ at the end. `.revealed(true)` permits interior edits while retaining all secure
 protections. Toggling alone preserves selection; hiding snaps geometry and resets
 ancestor scrolling. `TextArea::max_height(..)` or `auto_grow(..)` bounds revealed
 content. Revealed secure lines wrap long tokens automatically; other text can opt
-in with `El::wrap_anywhere()` (add `.shrink()` for flex-row shrinking).
+in with `El::wrap_anywhere()` (add `.shrink()` for flex-row shrinking). Code that lays
+out text itself passes `RichLayoutOptions::new().wrap_anywhere()` to
+`TextSystem::layout_rich_with(..)` for the same breaks.
 
 `tx.copy_secret(text, Duration::from_secs(30))` writes with the platform's clipboard
 history-exclusion marker and expires on Rune's shared clipboard worker. Expiry

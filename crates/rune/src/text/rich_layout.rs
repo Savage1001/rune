@@ -1,6 +1,34 @@
 //! The entry points that lay out rich text: [`TextSystem::layout_rich`] and its aligned,
-//! block-indented and per-spec variants, all over `layout_blocks_inner`.
+//! option, block-indented and per-spec variants, all over `layout_blocks_inner`.
 use super::*;
+
+/// How [`TextSystem::layout_rich_with`] lays out a paragraph. The default is
+/// [`layout_rich`](TextSystem::layout_rich): start-aligned, breaking only between words.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RichLayoutOptions {
+    align: Alignment,
+    wrap_anywhere: bool,
+}
+
+impl RichLayoutOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Aligns each line within the wrap width, as [`layout_aligned`](TextSystem::layout_aligned) does.
+    pub fn align(mut self, align: Alignment) -> Self {
+        self.align = align;
+        self
+    }
+
+    /// Breaks inside a word that has no break opportunity and is wider than the wrap width
+    /// (a long URL, hash or token) instead of letting it run past the line, as
+    /// [`El::wrap_anywhere`](crate::El::wrap_anywhere) does. Words that fit still break at spaces.
+    pub fn wrap_anywhere(mut self) -> Self {
+        self.wrap_anywhere = true;
+        self
+    }
+}
 
 impl TextSystem {
     /// A layout in device pixels, wrapped at `max_width` device px when given.
@@ -27,6 +55,20 @@ impl TextSystem {
         align: Alignment,
     ) -> Rc<Layout<Ink>> {
         self.layout_blocks(text, spans, &[], &[], style, scale, max_width, align)
+    }
+
+    /// [`layout_rich`](Self::layout_rich) with [`RichLayoutOptions`]: line alignment, and
+    /// wrapping inside a word wider than `max_width`.
+    pub fn layout_rich_with(
+        &mut self,
+        text: &str,
+        spans: &[Span],
+        style: TextStyle,
+        scale: f32,
+        max_width: Option<f32>,
+        options: RichLayoutOptions,
+    ) -> Rc<Layout<Ink>> {
+        self.layout_blocks_inner(text, spans, &[], &[], style, scale, max_width, options.align, options.wrap_anywhere, true)
     }
 
     /// [`layout_aligned`](Self::layout_aligned) with per-paragraph [`Block`](crate::Block)
@@ -60,3 +102,7 @@ impl TextSystem {
         self.layout_blocks_inner(&spec.content, &spec.spans, &spec.blocks, &spec.pills, spec.style, scale, max_width, align, spec.wrap_anywhere, !spec.redacted)
     }
 }
+
+#[cfg(test)]
+#[path = "rich_layout_tests.rs"]
+mod tests;

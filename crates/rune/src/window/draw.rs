@@ -87,8 +87,8 @@ impl<S: 'static> Host<S> {
             if l.prime > 0 && !pacing.running() {
                 None
             } else {
-                let Some(target) = pacing.next_frame() else { return };
-                Some(target)
+                let Some(target) = pacing.next_frame().target() else { return };
+                target
             }
         } else { None };
         #[cfg(target_os = "macos")]

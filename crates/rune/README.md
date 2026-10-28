@@ -688,7 +688,8 @@ For an app's own perf log, with nothing changed about how its windows draw:
   and a hidden launcher's count), `Unchanged` (a timer's frame that drew what was on screen, so no drawable was
   taken) or `Skipped` (covered, minimised, occluded or no drawable). `f.at()` is when encoding finished,
   `f.seq()` numbers the window's reports and `f.presents_at()` is the display link's target refresh when it paced
-  the frame (macOS). Headless runs, overlays and the web don't call it.
+  the frame (macOS; `None` for a frame drawn at once after the window rested, such as the first after a key
+  press). Headless runs, overlays and the web don't call it.
 - **`Tx::input_time()`** in an input handler is when that event arrived: the `NSEvent` timestamp on macOS, the
   moment the window took it from winit elsewhere. Events that pile up between frames keep their own times. It is
   `None` in timers, polls, updates and layout callbacks. The gap from it to the next `Drawn` frame's `at()` is the

@@ -1416,8 +1416,8 @@ impl<T: 'static> Overlay<T> {
         };
         #[cfg(target_os = "macos")]
         let target = if prewarm { None } else if let Some(pacing) = &mut live.pacing {
-            let Some(target) = pacing.next_frame() else { return false };
-            Some(target)
+            let Some(target) = pacing.next_frame().target() else { return false };
+            target
         } else { None };
         #[cfg(target_os = "macos")]
         let paced = live.pacing.as_ref().is_some_and(|p| p.running());

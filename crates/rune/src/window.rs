@@ -1269,32 +1269,6 @@ mod mac {
         }
     }
 
-    /// Electron's `trafficLightPosition`: the titlebar container grows to the buttons' height
-    /// plus twice `y`, and the buttons sit `x, y` from the top-left at AppKit's own pitch.
-    /// AppKit lays the titlebar out again on resize, so the shell calls this after each.
-    pub fn place_traffic_lights(window: &Window, (x, y): (f32, f32)) {
-        let Some(win) = ns_window(window) else { return };
-        if win.styleMask().contains(NSWindowStyleMask::FullScreen) {
-            return;
-        }
-        let buttons = [NSWindowButton::NSWindowCloseButton, NSWindowButton::NSWindowMiniaturizeButton, NSWindowButton::NSWindowZoomButton]
-            .map(|b| win.standardWindowButton(b));
-        let [Some(close), Some(mini), Some(zoom)] = buttons else { return };
-        // SAFETY: AppKit's own view hierarchy, on the main thread.
-        let Some(container) = (unsafe { close.superview().and_then(|v| v.superview()) }) else { return };
-        let (x, y) = (f64::from(x), f64::from(y));
-        let pitch = mini.frame().origin.x - close.frame().origin.x;
-        let mut frame = container.frame();
-        frame.size.height = close.frame().size.height + 2.0 * y;
-        frame.origin.y = win.frame().size.height - frame.size.height;
-        unsafe {
-            container.setFrame(frame);
-            for (i, b) in [close, mini, zoom].iter().enumerate() {
-                b.setFrameOrigin(NSPoint::new(x + i as f64 * pitch, y));
-            }
-        }
-    }
-
     /// Redraws the window once it has entered or left full screen, so the redraw can place the
     /// traffic lights and read the new `titlebar_inset`: winit sends no event for either, and
     /// resizes during the transition arrive while the style mask still says full screen.
@@ -1386,7 +1360,7 @@ fn place_chrome(window: &Window, chrome: Chrome) -> f32 {
     #[cfg(target_os = "macos")]
     {
         if let Some(p) = chrome.traffic_lights {
-            mac::place_traffic_lights(window, p);
+            crate::macos_traffic_lights::place(window, p);
         }
         mac::titlebar_inset(window)
     }

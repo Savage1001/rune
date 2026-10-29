@@ -8,6 +8,7 @@ members = [
     "crates/rune-fx",
     "crates/rune-light",
     "crates/procwatch",
+    "crates/rune-register",
     "crates/rune-knobs",
     "crates/rune-mac",
     "crates/rune-perf",

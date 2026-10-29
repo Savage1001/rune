@@ -3012,6 +3012,7 @@ impl<S: 'static> Runtime<S> {
     /// `AppSpec::on_key`, given the stage's state while the playground shows one of the app's.
     fn app_key(&mut self, f: fn(&mut S, &KeyEvent, &mut Tx) -> bool, ev: &KeyEvent, one: &mut Tx) -> bool {
         let state = match &mut self.playground {
+            Some(playground) if !playground.stage_hears(&self.state, ev.key == crate::Key::Escape) => None,
             Some(playground) => playground.key_state(&mut self.state),
             None => Some(&mut self.state),
         };
@@ -4959,6 +4960,7 @@ impl<S: 'static> Runtime<S> {
             }
             return;
         }
+        self.playground_pointer_down(x);
         self.press_selection(target, x, y);
         // Inside a draggable row, dragging drags the row; clicks still select words and lines.
         if target.is_some_and(|t| self.nodes[t].on_drag.is_some() || self.nodes[t].drag_out.is_some()) {

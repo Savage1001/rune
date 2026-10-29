@@ -2247,7 +2247,8 @@ $L --desktop examples/launcher/backdrop.png --script examples/launcher/scripts/d
 
 `App::playground` is a storybook built into the window. ⌘⇧D (Ctrl+Shift+D off macOS) opens it;
 in debug builds a 26 pt bar along the bottom opens it too. Its stories are the app's scenes plus
-its own pages and `Story`s, grouped by the part before a `/` in their names. One shows at a time on
+its own pages and `Story`s, grouped by the path in their names: `"Sidebar/Filter buttons/Compact"`
+lists Compact in Filter buttons, a group inside Sidebar, indented a step. One shows at a time on
 a plain stage, live and interactive, with a column beside it for that story's controls and
 triggers.
 
@@ -2286,22 +2287,41 @@ App::new(spec).playground(
   make its stories in a loop, each capturing its row. In a hot build, views that are fns or
   closures capturing nothing are patched live; a closure that captures runs as built.
 - **Variants.** `Story::variant(name, |p| ..)` and `Playground::variant(scene, name, |s| ..)` list
-  variants in the side column; 1–9 pick one, which makes the state again on it. A story starts on
-  its first variant, and digits it has no variant for reach the stage.
-- **Keys.** ↑↓ walk the group headers and the stories that show, J K skip the headers, ⌘↑ ⌘↓ go
-  to the first and last. ← → ↵ on a header fold or unfold its group, as a click on it does.
-  Folded groups stay folded while the app runs; `Playground::folds(load, save)` keeps them from
-  one run to the next (in `rune::prefs::Prefs`, say).
-  → or Tab move into the side column and ← out of it, and Esc (after the stage has had it) or
-  ⌘⇧D leaves. The side column lists each variant's and trigger's key and ends with a hint.
+  variants in the side column; with the keyboard there, 1–9 pick one, which makes the state again
+  on it. A story starts on its first variant.
+- **Groups.** Each `/` in a story's path nests a group, as deep as the path goes, and every
+  level folds: click its header, or ← → ↵ on it. Folds last while the app runs;
+  `Playground::folds(load, save)` keeps them from one run to the next (in `rune::prefs::Prefs`,
+  say), each group by its path (`"Sidebar/Filter buttons"`). `Playground::start_folded(true)`
+  starts every group folded but the open story's, which unfold each time the playground opens,
+  a link at launch included; with it, `folds` saves the groups left open instead. Groups keep
+  the order they first appear in, scenes first; `Playground::group_order(&["Prototypes",
+  "Fixtures"])` lists those top-level groups first, scenes and stories alike.
+- **Filter.** A field over the list keeps the stories whose path has every word typed, and the
+  groups above them, unfolded. / or a click focuses it, and it edits as any field does. ↓ goes
+  down to the first match and gives the list the keyboard, where ↑ from the first match goes
+  back up; Return opens the first match; Esc clears it, then leaves.
+- **Keys.** The keyboard is in one column at a time, the list, the stage or the side column, and
+  a click in a column moves it there. The column that has it shows its selection in the accent
+  (the stage a ring), and the hint under the side column lists its keys.
+  - In the list, ↑↓ walk the headers and the stories that show, J K skip the headers, ⌘↑ ⌘↓ go
+    to the first and last. ← on a story goes to its group; on a header it folds the group, then
+    goes to the one around it. → unfolds a header, then steps into it. R replays and trigger
+    letters run. → on a story or Tab moves to the side column, ⇧Tab to the stage, and Esc (after
+    the stage has had it) or ⌘⇧D leaves.
+  - In the side column, ↑↓ move between controls, 1–9 pick a variant, trigger letters run, and
+    ←, Tab or Esc go back to the list.
+  - On the stage, keys are the story's: its focused element's, then the stage's `on_key`. Esc it
+    leaves goes back to the list.
+
   `.shortcut(None)` turns the shortcut off; `tx.open_playground()` opens it from the app.
-  `Playground::typing(|s| ..)` gives the stage's `on_key` every key first, for a field drawn in
-  it.
+  `Playground::typing(|s| ..)` gives the stage's `on_key` every key first, wherever the keyboard
+  is, for a field drawn in it.
 - **Keys for side controls.** `Story::side_keys(view, key)` (or `Playground::side_keys(scene,
   view, key)`) is `.side(view)` for controls that take keys. → or Tab from the list puts the
   keyboard on them, `view` gets `active: true` while it's there to mark what the keys move,
-  and `key` gets each key first. Esc and Tab always leave; ← doesn't. Keys it leaves work as
-  elsewhere in the side column. For knobs it's one line:
+  and `key` gets each key first, only while the keyboard is there. Esc and Tab always leave; ←
+  doesn't. Keys it leaves work as elsewhere in the side column. For knobs it's one line:
   `.side_keys(|s, active, cx| rune_knobs::inline(&s.knobs, GROUPS, style(cx), lens, active), rune_knobs::side_key(GROUPS, lens))`,
   where ↑↓ pick a knob and ←→ step it.
 - **The real state.** `Playground::fresh(|real| ..)` starts scenes from the real state and
@@ -2374,14 +2394,15 @@ grouped list, and a knobs column) maps onto `App::playground` like this:
 | ------------------------------------------- | ---------------------------------------------------------------------- |
 | a story type implementing the trait         | `Story::new(name, init, view)`, or `Playground::page` for real state   |
 | a registered table of stories               | a loop of `Story::new(row.path, move \|\| .., move \|s, cx\| ..)`, closures capturing the row |
-| `group()` and `name()`                      | one name, `"Group/Name"`; groups keep the order they first appear in   |
+| `group()` and `name()`                      | one path, `"Group/Name"` or `"Group/Subgroup/Name"`; groups keep the order they first appear in, or `Playground::group_order` |
 | the story's keys (`Action`s)                | `Story::trigger(key, label, step)`, or `trigger_tx` for a `Fn(&mut S, &mut Tx)`; `'r'` runs after each replay |
 | timed steps after a key                     | `Play::after(secs, step)`, on the logical clock                        |
 | the knobs column                            | `.side(view)`: `rune_knobs::inline` fills the column's width; `actions` fits it, up to 300 pt |
 | keys for the knobs                          | `.side_keys(view, rune_knobs::side_key(groups, lens))`: ↑↓ pick a knob, ←→ step it, Esc leaves |
 | a choice knob flipped with 1–9              | `Story::variant(name, apply)`; 1–9 pick, and picking remakes the state |
 | setup from the app's state                  | `Story::from_real(name, derive, view)`, or `Playground::fresh`         |
-| collapsible groups                          | built in: click a header, or ← → ↵ on it; `Playground::folds(load, save)` keeps them between runs |
+| collapsible groups                          | built in at every level: click a header, or ← → ↵ on it; `Playground::folds(load, save)` keeps them between runs, `start_folded(true)` starts them folded |
+| a search field over the list                | built in: / focuses it, and it keeps the stories whose path matches    |
 | a key sheet                                 | built in: the side column shows each key beside its row, and a hint    |
 | open, leave, Esc, ⌘⇧D                       | built in: ⌘⇧D, Esc, Back, and `tx.open_playground()`                   |
 | a link to a story                           | `rune::playground::slug(path)`, and `tx.open_playground_at(slug, variant)` from `App::on_open_url` |

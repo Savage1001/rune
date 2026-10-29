@@ -190,6 +190,13 @@ impl<S: 'static> Live<S> {
         }
     }
 
+    /// Whether the stage hears a key (or `escape`) now: only while its column has the keyboard,
+    /// unless [`Playground::typing`] asks for every key. Escape goes to it wherever the keyboard
+    /// is: it may close something open on the stage.
+    pub(crate) fn stage_hears(&self, app: &S, escape: bool) -> bool {
+        !self.open || escape || self.region == Region::Stage || self.typing(app)
+    }
+
     /// The state `AppSpec::on_key` gets: the stage's when it's an app state, none on a story
     /// with its own.
     pub(crate) fn key_state<'a>(&'a mut self, app: &'a mut S) -> Option<&'a mut S> {

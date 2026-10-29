@@ -2888,6 +2888,7 @@ dependencies = [
  "resvg",
  "rfd",
  "rune-motion",
+ "rune-taffy",
  "serde",
  "serde_json",
  "subsecond",
@@ -2987,6 +2988,13 @@ dependencies = [
  "rune",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rune-taffy"
+version = "0.0.1"
+dependencies = [
+ "taffy",
 ]
 
 [[package]]

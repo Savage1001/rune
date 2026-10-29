@@ -18,9 +18,10 @@ fn reports_number_each_frame_of_their_window() {
     let (log, hook) = logging();
     let mut reports = FrameReports::<()>::new(Some(hook), Some("main"));
     let target = Instant::now() + Duration::from_millis(8);
+    let started = Instant::now();
     let encoded = reports.stamp();
     assert!(encoded.is_some(), "a hook takes the encode time");
-    reports.drawn(encoded, Some(target));
+    reports.drawn(encoded, Some(target), started, 0.0);
     reports.unchanged(Some(target));
     reports.skipped();
     let log = log.borrow();
@@ -35,10 +36,30 @@ fn reports_number_each_frame_of_their_window() {
 }
 
 #[test]
+fn a_drawn_frame_splits_its_work_into_update_and_encode() {
+    let (log, hook) = logging();
+    let mut reports = FrameReports::<()>::new(Some(hook), Some("main"));
+    let started = Instant::now();
+    let encoded = started + Duration::from_millis(5);
+    reports.drawn(Some(encoded), None, started, 2.0);
+    // A clock step can put the stamp before the update ended: encode time is never negative.
+    reports.drawn(Some(started), None, started, 2.0);
+    reports.unchanged(None);
+    reports.skipped();
+    let log = log.borrow();
+    assert_eq!(log[0].update_ms(), Some(2.0));
+    assert!((log[0].encode_ms().unwrap() - 3.0).abs() < 1e-9, "{:?}", log[0].encode_ms());
+    assert_eq!(log[1].encode_ms(), Some(0.0));
+    for f in &log[2..] {
+        assert_eq!((f.update_ms(), f.encode_ms()), (None, None), "{:?} frames did no work to time", f.outcome());
+    }
+}
+
+#[test]
 fn without_a_hook_nothing_is_timed_or_counted() {
     let mut reports = FrameReports::<()>::new(None, Some("main"));
     assert_eq!(reports.stamp(), None);
-    reports.drawn(None, None);
+    reports.drawn(None, None, Instant::now(), 1.0);
     reports.unchanged(None);
     reports.skipped();
     assert!(reports.0.is_none());

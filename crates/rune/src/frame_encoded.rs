@@ -19,6 +19,8 @@ pub struct FrameEncoded {
     window: Option<Rc<str>>,
     seq: u64,
     presents_at: Option<Instant>,
+    update_ms: Option<f64>,
+    encode_ms: Option<f64>,
 }
 
 /// What a frame came to.
@@ -54,6 +56,16 @@ impl FrameEncoded {
     /// frames, and for a frame drawn at once after the window rested (the first after a key
     /// press, say), which aims at the next refresh without waiting for a tick.
     pub fn presents_at(&self) -> Option<Instant> { self.presents_at }
+
+    /// For `Drawn`, the milliseconds from the frame's start (after its drawable came) until the
+    /// runtime had built it: events, `poll`, the view, layout and paint. The same value a
+    /// compositor gets as `Frame::update_ms`. `None` otherwise.
+    pub fn update_ms(&self) -> Option<f64> { self.update_ms }
+
+    /// For `Drawn`, the milliseconds from the end of the update until the frame's commands were
+    /// submitted (`at`): uploads, the renderer's prepare and draw, or a compositor's `render`.
+    /// CPU wall time; not GPU time, and not the wait to present. `None` otherwise.
+    pub fn encode_ms(&self) -> Option<f64> { self.encode_ms }
 }
 
 /// A window's hooks and the count it numbers reports with. Without a hook every call is one
@@ -83,9 +95,12 @@ impl<S: 'static> FrameReports<S> {
     /// The time to report a `Drawn` frame at, taken only when there's a hook.
     pub(crate) fn stamp(&self) -> Option<Instant> { self.0.as_ref().map(|_| Instant::now()) }
 
-    /// A frame encoded at `at` (from `stamp`).
-    pub(crate) fn drawn(&mut self, at: Option<Instant>, presents_at: Option<Instant>) {
-        if let Some(at) = at { self.report(FrameOutcome::Drawn, at, presents_at); }
+    /// A frame encoded at `at` (from `stamp`), which started at `started` and spent `update_ms`
+    /// of that building.
+    pub(crate) fn drawn(&mut self, at: Option<Instant>, presents_at: Option<Instant>, started: Instant, update_ms: f64) {
+        let Some(at) = at else { return };
+        let encode_ms = (at.saturating_duration_since(started).as_secs_f64() * 1000.0 - update_ms).max(0.0);
+        self.report(FrameOutcome::Drawn, at, presents_at, Some((update_ms, encode_ms)));
     }
 
     /// After a `Drawn` frame: `App::on_frame_drawn` reads the runtime as it presented.
@@ -94,16 +109,17 @@ impl<S: 'static> FrameReports<S> {
     }
 
     pub(crate) fn unchanged(&mut self, presents_at: Option<Instant>) {
-        if self.0.is_some() { self.report(FrameOutcome::Unchanged, Instant::now(), presents_at); }
+        if self.0.is_some() { self.report(FrameOutcome::Unchanged, Instant::now(), presents_at, None); }
     }
 
     pub(crate) fn skipped(&mut self) {
-        if self.0.is_some() { self.report(FrameOutcome::Skipped, Instant::now(), None); }
+        if self.0.is_some() { self.report(FrameOutcome::Skipped, Instant::now(), None, None); }
     }
 
-    fn report(&mut self, outcome: FrameOutcome, at: Instant, presents_at: Option<Instant>) {
+    fn report(&mut self, outcome: FrameOutcome, at: Instant, presents_at: Option<Instant>, work: Option<(f64, f64)>) {
         let Some(r) = &mut self.0 else { return };
-        let frame = FrameEncoded { at, outcome, window: r.window.clone(), seq: r.seq, presents_at };
+        let (update_ms, encode_ms) = (work.map(|w| w.0), work.map(|w| w.1));
+        let frame = FrameEncoded { at, outcome, window: r.window.clone(), seq: r.seq, presents_at, update_ms, encode_ms };
         r.seq += 1;
         (r.hook)(&frame);
     }

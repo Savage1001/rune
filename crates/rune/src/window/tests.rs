@@ -249,7 +249,9 @@ impl CompHost {
     /// As `draw`: a quiet frame (only a timer asked for it) that draws what's on screen presents
     /// nothing, unless a compositor draws it. Returns whether it presented.
     fn frame(&mut self, quiet: bool) -> bool {
+        let started = Instant::now();
         let animating = self.rt.frame(crate::frame_clock::RESUME_STEP);
+        let update_ms = started.elapsed().as_secs_f64() * 1000.0;
         if quiet && self.comp.is_none() && self.presented.as_ref().is_some_and(|p| p.unchanged(&self.rt, &self.config, animating, None)) {
             self.reports.unchanged(None);
             return false;
@@ -258,7 +260,7 @@ impl CompHost {
         let encoded = self.reports.stamp();
         self.idle = Presented::settle(&mut self.presented, &self.rt, &self.config, moving, None, true, self.comp.is_some());
         self.frames += 1;
-        self.reports.drawn(encoded, None);
+        self.reports.drawn(encoded, None, started, update_ms);
         true
     }
 

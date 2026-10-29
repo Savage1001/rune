@@ -289,7 +289,7 @@ impl<S: 'static> Host<S> {
         // A display link that couldn't be made while the displays slept: they're back.
         #[cfg(target_os = "macos")]
         if !hidden && l.pacing.is_none() { l.pacing = crate::display_link::DisplayLink::retry(&l.window, self.frame_wake.clone()); }
-        self.frame_reports.drawn(encoded, presents_at);
+        self.frame_reports.drawn(encoded, presents_at, now, update_ms);
         self.frame_reports.inspect(rt);
         if let Some(trace) = self.trace.as_mut() {
             // A frame count keeps the trace redrawing while idle, as below.

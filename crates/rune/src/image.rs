@@ -456,59 +456,89 @@ mod freedesktop {
 
 #[cfg(target_os = "macos")]
 fn macos_icon(path: &std::path::Path, px: u32) -> Result<(u32, u32, Vec<u8>), ImageError> {
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
-    use objc2::rc::{Allocated, Retained};
-    use objc2::{msg_send, msg_send_id};
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::msg_send;
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
     let path = path.to_str().ok_or_else(|| ImageError("app icon path is not UTF-8".into()))?;
-    let class = |name: &str| AnyClass::get(name).ok_or_else(|| ImageError(format!("{name} is unavailable")));
-    let (workspace, bitmap, context, color_space) =
-        (class("NSWorkspace")?, class("NSBitmapImageRep")?, class("NSGraphicsContext")?, class("NSColorSpace")?);
+    let workspace = macos_class("NSWorkspace")?;
     objc2::rc::autoreleasepool(|_| unsafe {
         let workspace: *mut AnyObject = msg_send![workspace, sharedWorkspace];
         let icon: *mut AnyObject = msg_send![workspace, iconForFile: &*NSString::from_str(path)];
         if icon.is_null() { return Err(ImageError("NSWorkspace returned no icon".into())); }
+        let zero = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+        // IconServices picks its rendition by the size asked for, and on macOS 26 and later a
+        // small size of an app without a modern icon is the "legacy" one: a shrunken tile in a
+        // grey frame. Draw at 256 pixels or more, then scale down.
+        let big = px.max(256);
+        // NSCompositingOperationCopy (1); a zero fromRect draws the whole best-fit representation.
+        let large = macos_bitmap(big, |_, rect| { let _: () = msg_send![icon, drawInRect: rect fromRect: zero operation: 1usize fraction: 1.0f64]; })?;
+        let small = if big == px { large } else {
+            macos_bitmap(px, |ctx, rect| {
+                // NSImageInterpolationHigh.
+                let _: () = msg_send![ctx, setImageInterpolation: 3usize];
+                let none: *mut AnyObject = std::ptr::null_mut();
+                let _: Bool = msg_send![large, drawInRect: rect fromRect: zero operation: 1usize fraction: 1.0f64 respectFlipped: Bool::NO hints: none];
+            })?
+        };
         let side = px as isize;
+        let data: *const u8 = msg_send![small, bitmapData];
+        let stride: isize = msg_send![small, bytesPerRow];
+        if data.is_null() || stride < side * 4 { return Err(ImageError("icon bitmap has no pixel data".into())); }
+        let mut out = Vec::with_capacity((px * px * 4) as usize);
+        for y in 0..side {
+            let row = std::slice::from_raw_parts(data.offset(y * stride), (side * 4) as usize);
+            for p in row.chunks_exact(4) {
+                let a = p[3];
+                let straight = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
+                out.extend_from_slice(&[straight(p[0]), straight(p[1]), straight(p[2]), a]);
+            }
+        }
+        Ok((px, px, out))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_class(name: &str) -> Result<&'static objc2::runtime::AnyClass, ImageError> {
+    objc2::runtime::AnyClass::get(name).ok_or_else(|| ImageError(format!("{name} is unavailable")))
+}
+
+/// A `side`×`side` sRGB bitmap with `draw(context, rect)` run into it as the current context.
+/// Autoreleased: call inside an autorelease pool.
+#[cfg(target_os = "macos")]
+unsafe fn macos_bitmap(
+    side: u32,
+    draw: impl FnOnce(*mut objc2::runtime::AnyObject, objc2_foundation::NSRect),
+) -> Result<*mut objc2::runtime::AnyObject, ImageError> {
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::rc::{Allocated, Retained};
+    use objc2::{msg_send, msg_send_id};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    let (bitmap, context, color_space) = (macos_class("NSBitmapImageRep")?, macos_class("NSGraphicsContext")?, macos_class("NSColorSpace")?);
+    let n = side as isize;
+    // SAFETY: AppKit bitmap and context calls on objects this function retains or that live in
+    // the caller's autorelease pool.
+    unsafe {
         let rep: Allocated<AnyObject> = msg_send_id![bitmap, alloc];
         let null: *mut *mut u8 = std::ptr::null_mut();
         // Default bitmapFormat is premultiplied alpha-last RGBA, the only layout AppKit draws into.
         let rep: Option<Retained<AnyObject>> = msg_send_id![rep,
-            initWithBitmapDataPlanes: null pixelsWide: side pixelsHigh: side bitsPerSample: 8isize
+            initWithBitmapDataPlanes: null pixelsWide: n pixelsHigh: n bitsPerSample: 8isize
             samplesPerPixel: 4isize hasAlpha: Bool::YES isPlanar: Bool::NO
             colorSpaceName: &*NSString::from_str("NSDeviceRGBColorSpace") bitmapFormat: 0usize
-            bytesPerRow: side * 4 bitsPerPixel: 32isize];
+            bytesPerRow: n * 4 bitsPerPixel: 32isize];
         let rep = rep.ok_or_else(|| ImageError("could not allocate an icon bitmap".into()))?;
         let srgb: *mut AnyObject = msg_send![color_space, sRGBColorSpace];
         let tagged: *mut AnyObject = msg_send![&*rep, bitmapImageRepByRetaggingWithColorSpace: srgb];
-        let tagged = if tagged.is_null() { Retained::as_ptr(&rep).cast_mut() } else { tagged };
+        let tagged = if tagged.is_null() { Retained::autorelease_return(rep) } else { tagged };
         let ctx: *mut AnyObject = msg_send![context, graphicsContextWithBitmapImageRep: tagged];
         if ctx.is_null() { return Err(ImageError("could not create an icon context".into())); }
         let _: () = msg_send![context, saveGraphicsState];
         let _: () = msg_send![context, setCurrentContext: ctx];
-        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(px as f64, px as f64));
-        let zero = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
-        // NSCompositingOperationCopy (1); a zero fromRect draws the whole best-fit representation.
-        let _: () = msg_send![icon, drawInRect: rect fromRect: zero operation: 1usize fraction: 1.0f64];
+        draw(ctx, NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(side as f64, side as f64)));
         let _: () = msg_send![ctx, flushGraphics];
         let _: () = msg_send![context, restoreGraphicsState];
-        let data: *const u8 = msg_send![tagged, bitmapData];
-        let stride: isize = msg_send![tagged, bytesPerRow];
-        let result = if data.is_null() || stride < side * 4 {
-            Err(ImageError("icon bitmap has no pixel data".into()))
-        } else {
-            let mut out = Vec::with_capacity((px * px * 4) as usize);
-            for y in 0..side {
-                let row = std::slice::from_raw_parts(data.offset(y * stride), (side * 4) as usize);
-                for p in row.chunks_exact(4) {
-                    let a = p[3];
-                    let straight = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 };
-                    out.extend_from_slice(&[straight(p[0]), straight(p[1]), straight(p[2]), a]);
-                }
-            }
-            Ok((px, px, out))
-        };
-        result
-    })
+        Ok(tagged)
+    }
 }
 
 fn decode(bytes: &[u8]) -> Result<Decoded, ImageError> {
@@ -815,5 +845,28 @@ mod tests {
         let pixels = &icon.decoded().unwrap().unwrap().mips[0].pixels;
         let opaque = pixels.chunks_exact(4).filter(|p| p[3] > 0).count();
         assert!(opaque > 64 * 64 / 4, "icon is mostly empty: {opaque} visible pixels");
+    }
+
+    /// A small icon is the large one scaled down, not a different (on macOS 26 and later, a
+    /// framed "legacy") rendition.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_small_app_icon_matches_the_large_one_scaled_down() {
+        let app = std::path::Path::new("/System/Applications/Calculator.app");
+        let (_, _, small) = app_icon_rgba(app, 32).unwrap();
+        let (_, _, large) = app_icon_rgba(app, 256).unwrap();
+        let mut worst = 0u32;
+        for y in 0..32 {
+            for x in 0..32 {
+                // Straight colour is noise where the icon is nearly transparent.
+                let solid = small[(y * 32 + x) * 4 + 3] >= 200;
+                for c in (if solid { 0 } else { 3 })..4 {
+                    let block: u32 = (0..8).flat_map(|dy| (0..8).map(move |dx| (dx, dy)))
+                        .map(|(dx, dy)| u32::from(large[((y * 8 + dy) * 256 + x * 8 + dx) * 4 + c])).sum();
+                    worst = worst.max((block / 64).abs_diff(u32::from(small[(y * 32 + x) * 4 + c])));
+                }
+            }
+        }
+        assert!(worst < 64, "the 32 px icon differs from the 256 px one by up to {worst}");
     }
 }

@@ -153,6 +153,9 @@ mod pixel_snap;
 #[path = "runtime/shape_paint.rs"]
 mod shape_paint;
 use shape_paint::push_shape;
+#[path = "runtime/retained_subtrees.rs"]
+mod retained_subtrees;
+pub use retained_subtrees::{RetainedSubtreeStats, SubtreeRetention};
 use props::*;
 pub(crate) use scroll_x::{SHIFT_TURNS_WHEEL, wheel_delta};
 pub(crate) use scroll_offset::ScrollRequest;
@@ -1011,6 +1014,7 @@ pub struct Runtime<S: 'static> {
     node_index: HashMap<NodeId, usize>,
     path_ids: HashMap<String, NodeId>,
     pub(crate) memo: crate::memo::MemoCache,
+    pub(crate) retained: retained_subtrees::RetainedSubtrees,
     next_id: u64,
     commits: u64,
     dirty: bool,
@@ -1441,6 +1445,7 @@ impl<S: 'static> Runtime<S> {
             node_index: HashMap::new(),
             path_ids: HashMap::new(),
             memo: Default::default(),
+            retained: Default::default(),
             next_id: 1,
             commits: 0,
             dirty: true,
@@ -2478,6 +2483,7 @@ impl<S: 'static> Runtime<S> {
             self.has_cache |= n.vis.cache;
             self.nodes.push(n);
         }
+        self.retained.remap_after_prune(&remap);
         self.virtuals.retain(|path, _| self.nodes.iter().any(|n| n.path == *path));
         self.refresh_modal_index();
         self.flying.retain(|(id, _)| self.node_index.contains_key(id));
@@ -3447,7 +3453,8 @@ struct Measurement<'a, S: 'static> {
     reduced_motion: bool,
     time_scale: f32,
     commits: u64,
-    nodes: &'a [Node],
+    nodes: &'a mut [Node],
+    retained: &'a mut retained_subtrees::RetainedSubtrees,
     text: &'a mut TextSystem,
     layout: &'a mut TaffyTree<usize>,
     layout_entries: &'a mut HashMap<String, LayoutEntry>,
@@ -3499,12 +3506,14 @@ impl<S: 'static> Measurement<'_, S> {
         let (layout, nodes) = loop {
             passes += 1;
             self.retry = passes > 1;
+            self.retained.begin_measure_pass();
             self.virtual_culled.clear();
             self.virtual_inputs.clear();
             // Degenerate zero-height runs fall back to a full measurement instead of
             // an unbounded retry loop. Normal transcripts need one pass.
-            let (layout, nodes) = self.measure_view(tx, passes > 8);
+            let (layout, mut nodes) = self.measure_view(tx, passes > 8);
             if !self.measure_virtuals(&nodes, tx.settle) { break (layout, nodes); }
+            self.retained.restore_spliced(self.nodes, &mut nodes);
             *self.layout = layout;
         };
         // Exiting virtual subtrees still use their origin and measured extent while
@@ -3516,6 +3525,7 @@ impl<S: 'static> Measurement<'_, S> {
     /// is the scroll viewport `el` is the content of, whether it sticks to the bottom, and its bound.
     #[allow(clippy::too_many_arguments)]
     fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool, f32)>, settle: bool, force_all: bool, bound: f32, inert: bool, group: Option<&str>) {
+        if self.retained.skip_window_tree(el) { return; }
         el.expand_memo();
         let inert = inert || el.inert;
         let bound = crate::virtual_list::height_bound(&el.style, bound);
@@ -3635,6 +3645,7 @@ impl<S: 'static> Measurement<'_, S> {
             _s: PhantomData,
         };
         let mut cx = fresh_cx(self);
+        self.memo.disabled = !self.retained.mode().caches_builder();
         #[cfg(feature = "hot")]
         let emptied = self.memo.emptied();
         let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_accent, self.system_reduced_motion, cx.caret.clone(), cx.layout.clone());
@@ -3676,18 +3687,13 @@ impl<S: 'static> Measurement<'_, S> {
         for read in replayed.layout { layout_read::note_read(&mut self.layout_reads, &read.key, read.same); }
 
         let mut taffy = std::mem::replace(self.layout, TaffyTree::with_capacity(0));
-        for entry in self.layout_entries.values_mut() {
-            entry.used = false;
-        }
+        let prev_entries = self.retained.prepare_flatten(self.layout_entries);
         let mut nodes = Vec::with_capacity(self.nodes.len().max(32));
         // Root constraints are part of the retained style, not a dirty write after flattening.
         // A window that fits its content lays the root out at its natural height.
         root.style.size = Size { width: length(self.viewport.0), height: if self.fit_height { auto() } else { length(self.viewport.1) } };
-        let root_id = flatten(root, None, "", 0, motion::DEFAULT, RowLayout::Free, true, &mut taffy, &mut nodes, &mut self.layout_entries, scale);
-        self.layout_entries.retain(|_, entry| {
-            if !entry.used { taffy.remove(entry.id).unwrap(); }
-            entry.used
-        });
+        let root_id = flatten(root, None, "", 0, motion::DEFAULT, RowLayout::Free, true, &mut taffy, &mut nodes, &mut self.layout_entries, scale, &mut self.retained, self.nodes);
+        self.retained.finish_flatten(prev_entries, self.layout_entries, &mut taffy, &nodes);
         let room = Size {
             width: AvailableSpace::Definite(self.viewport.0),
             height: if self.fit_height { AvailableSpace::MaxContent } else { AvailableSpace::Definite(self.viewport.1) },
@@ -3717,6 +3723,7 @@ impl<S: 'static> Measurement<'_, S> {
             self.place(&taffy, &mut nodes);
         }
         for n in &mut nodes {
+            if n.text_layout.is_some() || n.text.is_none() { continue; }
             let l = taffy.layout(n.taffy).unwrap();
             let ins = n.inset;
             // A cell of a run draws from the run's layout (and keeps it cached) instead of its own.
@@ -3759,21 +3766,25 @@ impl<S: 'static> Runtime<S> {
             }
         }
         self.refresh_layout_seen();
+        self.retained.begin_commit(&self.nodes, &self.scene);
         let mut measured = self.measure(tx);
         self.focus_before_commit = self.focused.clone();
         // Settle layout reads first so a field that mounts once a rect is known is in `nodes`.
         measured = self.settle_layout_reads(measured, tx);
         if self.sync_requested_focus(&mut measured.nodes) {
+            self.retained.restore_spliced(&mut self.nodes, &mut measured.nodes);
             self.layout = measured.layout;
             measured = self.measure(tx);
             measured = self.settle_layout_reads(measured, tx);
         }
         if measured.caret_read && self.caret_moved(Some(&measured.nodes)) {
+            self.retained.restore_spliced(&mut self.nodes, &mut measured.nodes);
             self.layout = measured.layout;
             measured = self.measure(tx);
             measured = self.settle_layout_reads(measured, tx);
         }
         self.apply(measured, tx);
+        self.retained.finish_commit(self.nodes.len());
         self.scene.keep_flights(false);
         self.memo.keep_since(self.memo_since);
         self.track_focused_rows();
@@ -3798,7 +3809,8 @@ impl<S: 'static> Runtime<S> {
             layout_seen: self.layout_seen.rects.clone(),
             layout_reads: Vec::new(),
             commits: self.commits,
-            nodes: &self.nodes,
+            nodes: &mut self.nodes,
+            retained: &mut self.retained,
             text: &mut self.text,
             layout: &mut self.layout,
             layout_entries: &mut self.layout_entries,
@@ -3823,7 +3835,8 @@ impl<S: 'static> Runtime<S> {
         let _apply_time = crate::frame_profile::Scope::new(crate::frame_profile::Phase::Apply);
         let Measured { layout: taffy, mut nodes, reduced_motion, time_scale, caret_read, .. } = measured;
         self.caret_watch = caret_read;
-        if reduced_motion != self.reduced_motion {
+        let reduced_motion_changed = reduced_motion != self.reduced_motion;
+        if reduced_motion_changed {
             self.reduced_motion = reduced_motion;
             self.scene.set_reduced_motion(reduced_motion);
         }
@@ -4058,7 +4071,10 @@ impl<S: 'static> Runtime<S> {
         // `El::matched` elements of this tree: (id, index, newly mounted).
         let mut arrivals: Vec<(Rc<str>, usize, bool)> = Vec::new();
         let mut mounted = vec![false; nodes.len()];
+        let mut splice_cursor = 0usize;
         for i in 0..nodes.len() {
+            let spliced = self.retained.spliced_at(i, &mut splice_cursor);
+            let is_spliced = spliced.is_some();
             let id = nodes[i].id;
             let parent_id = nodes[i].parent.map(|p| nodes[p].id);
             let spring_l = tx.motion.unwrap_or(nodes[i].motion);
@@ -4071,15 +4087,25 @@ impl<S: 'static> Runtime<S> {
             // its own entrance and exit, and colours, stay with the commit.
             let enters_at_once = instant || nodes[i].parent.is_some_and(|p| nodes[p].instant_changes);
             let lands = instant || nodes[i].instant_changes;
-            let layout_instant = lands || row_like || tx.relayout || self.virtuals.contains_key(&nodes[i].path)
-                || self.aspect_snap.contains(&id);
+            let is_virtual = !is_spliced && !self.virtuals.is_empty() && self.virtuals.contains_key(&nodes[i].path);
+            let is_aspect_snap = !is_spliced && !self.aspect_snap.is_empty() && self.aspect_snap.contains(&id);
+            let layout_instant = lands || row_like || tx.relayout || is_virtual || is_aspect_snap;
             let mut scene_rect = nodes[i].local;
-            if let Some(v) = nodes[i].parent.and_then(|p| self.virtuals.get(&nodes[p].path)) {
+            let parent_virtual = if self.virtuals.is_empty() || spliced.is_some_and(|(_, root_i)| i > root_i) {
+                None
+            } else {
+                nodes[i].parent.and_then(|p| self.virtuals.get(&nodes[p].path))
+            };
+            let has_parent_virtual = parent_virtual.is_some();
+            if let Some(v) = parent_virtual {
                 scene_rect.y -= v.before;
             }
 
-            let was_present = self.scene.contains(id);
-            let was_exiting = self.is_exiting(id);
+            let (was_present, was_exiting) = if is_spliced {
+                (true, false)
+            } else {
+                (self.scene.contains(id), self.is_exiting(id))
+            };
             if was_present && !was_exiting && !enters_at_once && !unseen_ids.is_empty() { self.reenter_unseen_row(&nodes, i, &unseen_ids); }
             if let Some((key, _)) = &nodes[i].matched {
                 arrivals.push((key.clone(), i, !was_present || was_exiting));
@@ -4112,16 +4138,18 @@ impl<S: 'static> Runtime<S> {
                 let mount = if enters_at_once || nodes[i].virtual_mount || quiet_row { Mount::Initial } else { Mount::Animated };
                 self.scene.insert(id, spec, mount);
             }
-            self.scene.set_ride_trailing(id, nodes[i].vis.ride_trailing);
+            if !is_spliced {
+                self.scene.set_ride_trailing(id, nodes[i].vis.ride_trailing);
+            }
             // How far a growth or virtual row's place jumps in this commit (drawn minus new).
             let mut row_jump = 0.0;
             if was_present {
                 // As in SwiftUI, a node leaves with the transition of its last render.
-                if !was_exiting {
+                if !was_exiting && !is_spliced {
                     self.scene.set_transition(id, nodes[i].transition.unwrap_or_else(Transition::opacity));
                 }
-                let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || self.virtuals.contains_key(&nodes[i].path)
-                    || (nodes[i].in_row == RowLayout::Horizontal && !self.aspect_snap.contains(&id));
+                let stack_row = nodes[i].parent.is_some_and(|p| nodes[p].growth.is_some()) || is_virtual
+                    || (nodes[i].in_row == RowLayout::Horizontal && !is_aspect_snap);
                 // A window's own resize step moves content at rest with the window; motion
                 // already running retargets on its spring.
                 let follows_window = tx.window_step && !self.flying.iter().any(|f| f.0 == id)
@@ -4129,6 +4157,20 @@ impl<S: 'static> Runtime<S> {
                 // Out of sight before and after: nobody would see it move.
                 let out_of_sight = unseen.get(i).copied().unwrap_or(false) && nodes[i].matched.is_none()
                     && !self.flying.iter().any(|f| f.0 == id);
+                let skip_vis = self.retained.skip_visual_apply(is_spliced, instant, lands, out_of_sight, reduced_motion_changed, tx, &self.scene);
+                if skip_vis
+                    && let Some((old_i, _)) = spliced
+                    && nodes[i].live.is_empty()
+                    && !has_parent_virtual
+                    && !stack_row
+                    && !layout_instant
+                    && !tx.window_step
+                    && self.flying.is_empty()
+                    && !self.launches.pending()
+                    && scene_rect == self.nodes[old_i].local
+                {
+                    continue;
+                }
                 let layout_anim = if out_of_sight {
                     LayoutAnim::INSTANT
                 } else if stack_row && !lands && !tx.relayout && !follows_window {
@@ -4169,6 +4211,9 @@ impl<S: 'static> Runtime<S> {
                     }
                 } else if !nodes[i].live.iter().any(|b| b.property == crate::live::Property::Rect) {
                     self.scene.set_frame(id, scene_rect, layout_anim);
+                }
+                if skip_vis {
+                    continue;
                 }
                 let quiet = lands || out_of_sight;
                 self.set_or_anim(id, prop::RADIUS, Corners(nodes[i].vis.radius), spring_l, quiet);
@@ -4395,6 +4440,12 @@ impl<S: 'static> Runtime<S> {
         let old_nodes = std::mem::take(&mut self.nodes);
         let old_ids: Vec<NodeId> = old_nodes.iter().map(|n| n.id).collect();
         for (oi, mut old) in old_nodes.into_iter().enumerate() {
+            if retained_subtrees::is_stub(&old) {
+                if tx.settle && let Some(&i) = self.node_index.get(&old.id) {
+                    for bound in &mut nodes[i].live { bound.seen = None; }
+                }
+                continue;
+            }
             if let Some(&i) = self.node_index.get(&old.id) {
                 let mut fill = None;
                 for bound in &mut nodes[i].live {

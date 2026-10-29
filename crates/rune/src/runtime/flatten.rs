@@ -68,8 +68,16 @@ pub(super) fn flatten(
     nodes: &mut Vec<Node>,
     entries: &mut HashMap<String, LayoutEntry>,
     scale: f32,
+    retained: &mut retained_subtrees::RetainedSubtrees,
+    old_nodes: &mut [Node],
 ) -> taffy::NodeId {
+    if let Some(id) = retained.try_splice(
+        &el, parent, parent_path, index, motion, in_row, parent_row, scale, taffy, nodes, old_nodes, entries,
+    ) {
+        return id;
+    }
     let mut el = el;
+    let record = retained.prepare_record(&mut el, parent, motion, in_row, parent_row, nodes, scale);
     el.expand_memo();
     let path = node_path(parent_path, el.key.as_deref(), index);
     let own_motion = el.motion;
@@ -336,7 +344,7 @@ pub(super) fn flatten(
     let kids: Vec<taffy::NodeId> = children
         .into_iter()
         .enumerate()
-        .map(|(i, c)| flatten(c, Some(me), &path, i, motion, child_in_row, row, taffy, nodes, entries, scale))
+        .map(|(i, c)| flatten(c, Some(me), &path, i, motion, child_in_row, row, taffy, nodes, entries, scale, retained, old_nodes))
         .collect();
     let id = if let Some(entry) = entries.get_mut(&path) {
         let id = entry.id;
@@ -358,6 +366,7 @@ pub(super) fn flatten(
         }
         entry.measure = measure;
         entry.used = true;
+        retained.note_entry_reused();
         id
     } else if !kids.is_empty() {
         taffy.new_with_children(style, &kids).unwrap()
@@ -373,5 +382,8 @@ pub(super) fn flatten(
         entries.insert(path, LayoutEntry { id, measure, used: true });
     }
     nodes[me].taffy = id;
+    if let Some(token) = record {
+        retained.finish_record(token, me..nodes.len());
+    }
     id
 }

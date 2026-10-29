@@ -62,6 +62,8 @@ pub(crate) struct Shared {
     /// Whether two siblings anywhere among them share a key, so the per-commit key check can
     /// skip a memo without any.
     pub(crate) duplicate_keys: bool,
+    /// Cached subtree-retention eligibility: `0` unknown, `1` ineligible, `2` eligible.
+    pub(crate) retainable: std::cell::Cell<u8>,
 }
 
 /// Whether `el` or anything under it is a focused field.
@@ -79,16 +81,26 @@ struct Built {
 
 impl Built {
     fn new(mut el: El) -> Rc<Built> {
+        el.key = None;
         el.expand_memo();
         let children = std::mem::take(&mut el.children);
         let focused_input = children.iter().any(has_focused_input);
         let duplicate_keys = crate::key_diagnostics::memo_children_have_duplicates(&el, &children);
-        Rc::new(Built { root: el, children: Rc::new(Shared { children, focused_input, duplicate_keys }) })
+        Rc::new(Built {
+            root: el,
+            children: Rc::new(Shared {
+                children,
+                focused_input,
+                duplicate_keys,
+                retainable: std::cell::Cell::new(0),
+            }),
+        })
     }
 
     /// The root, with its children shared rather than copied.
-    fn placeholder(&self) -> El {
+    fn placeholder(&self, key: String) -> El {
         let mut el = self.root.clone();
+        el.key = Some(key);
         el.memo_children = Some(self.children.clone());
         el
     }
@@ -156,6 +168,7 @@ struct Entry {
 pub(crate) struct MemoCache {
     entries: HashMap<Rc<str>, Entry>,
     pass: u64,
+    pub(crate) disabled: bool,
     #[cfg(test)]
     pub(crate) builds: usize,
 }
@@ -168,7 +181,7 @@ impl MemoCache {
     /// No memos, counting passes on from this cache's, for a build that must start from scratch.
     #[cfg(feature = "hot")]
     pub(crate) fn emptied(&self) -> MemoCache {
-        MemoCache { pass: self.pass, ..MemoCache::default() }
+        MemoCache { pass: self.pass, disabled: self.disabled, ..MemoCache::default() }
     }
 
     /// The pass the next view build will be.
@@ -356,12 +369,12 @@ pub fn memo(id: impl Into<String>, version: impl Hash, build: impl FnOnce() -> E
     let key = id.into();
     let version = hash_of(&version);
     enum Step {
-        Reuse(El),
+        Reuse(Rc<Built>),
         Build { id: Rc<str>, version: u64, store: bool },
         Plain,
     }
     let step = SCOPES.with_borrow_mut(|scopes| {
-        let Some(s) = scopes.last_mut() else { return Step::Plain };
+        let Some(s) = scopes.last_mut().filter(|s| !s.cache.disabled) else { return Step::Plain };
         let version = hash_of(&(version, s.env));
         let nested_id = s.path.last().map(|p| format!("{p}/{key}"));
         let name = nested_id.as_deref().unwrap_or(&key);
@@ -373,11 +386,11 @@ pub fn memo(id: impl Into<String>, version: impl Hash, build: impl FnOnce() -> E
                 store = false;
             } else if e.version == version && e.reads.iter().all(|r| s.seen.holds(r)) {
                 e.pass = pass;
-                reused = Some((e.built.placeholder(), e.nested.clone(), e.reads.clone()));
+                reused = Some((e.built.clone(), e.nested.clone(), e.reads.clone()));
             }
         }
         let rc_id = || -> Rc<str> { name.into() };
-        if let Some((el, nested, reads)) = reused {
+        if let Some((built, nested, reads)) = reused {
             keep_nested(&mut s.cache, nested, pass);
             s.note(&reads);
             for read in reads {
@@ -391,7 +404,7 @@ pub fn memo(id: impl Into<String>, version: impl Hash, build: impl FnOnce() -> E
             if let Some(parent) = s.nested.last_mut() {
                 parent.push(rc_id());
             }
-            return Step::Reuse(el);
+            return Step::Reuse(built);
         }
         let id = rc_id();
         if let Some(parent) = s.nested.last_mut() {
@@ -403,13 +416,17 @@ pub fn memo(id: impl Into<String>, version: impl Hash, build: impl FnOnce() -> E
         Step::Build { id, version, store }
     });
     let (id, version, store) = match step {
-        Step::Reuse(el) => return el,
+        Step::Reuse(built) => return built.placeholder(key),
         Step::Plain => return build().key(key),
         Step::Build { id, version, store } => (id, version, store),
     };
-    let el = build().key(key);
+    let el = build().key(String::new());
     SCOPES.with_borrow_mut(|scopes| {
-        let Some(s) = scopes.last_mut() else { return el };
+        let Some(s) = scopes.last_mut() else {
+            let mut el = el;
+            el.key = Some(key);
+            return el;
+        };
         s.path.pop();
         let nested = s.nested.pop().unwrap_or_default();
         let reads = s.reads.pop().unwrap_or_default();
@@ -419,10 +436,12 @@ pub fn memo(id: impl Into<String>, version: impl Hash, build: impl FnOnce() -> E
             s.cache.builds += 1;
         }
         if !store {
+            let mut el = el;
+            el.key = Some(key);
             return el;
         }
         let built = Built::new(el);
-        let el = built.placeholder();
+        let el = built.placeholder(key);
         let pass = s.cache.pass;
         s.cache.entries.insert(id, Entry { version, built, reads, nested, pass });
         el

@@ -330,6 +330,7 @@ impl<S: 'static> Runtime<S> {
                 settled = true;
                 break;
             }
+            self.retained.restore_spliced(&mut self.nodes, &mut measured.nodes);
             self.layout = measured.layout;
             measured = self.measure(tx);
         }

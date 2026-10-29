@@ -66,10 +66,24 @@ impl<S: 'static> Measurement<'_, S> {
         self.node_index.clear();
         self.node_index.reserve(nodes.len());
         for i in 0..nodes.len() {
-            let id = self.node_id(&nodes[i].path);
+            let id = if nodes[i].id.0 != 0 { nodes[i].id } else { self.node_id(&nodes[i].path) };
             nodes[i].id = id;
             self.node_index.insert(id, i);
             let l = taffy.layout(nodes[i].taffy).unwrap();
+            let inset = [
+                l.padding.left + l.border.left,
+                l.padding.top + l.border.top,
+                l.padding.right + l.border.right,
+                l.padding.bottom + l.border.bottom,
+            ];
+            if nodes[i].text_layout.is_some() {
+                let old_w = (nodes[i].local.w - nodes[i].inset[0] - nodes[i].inset[2]).max(0.0);
+                let new_w = (l.size.width - inset[0] - inset[2]).max(0.0);
+                if (old_w - new_w).abs() > 1e-4 {
+                    nodes[i].text_layout = None;
+                    nodes[i].elided = None;
+                }
+            }
             nodes[i].local = MRect::new(l.location.x, l.location.y, l.size.width, l.size.height);
             let (px, py) = nodes[i].parent.map_or((0.0, 0.0), |p| (nodes[p].target[0], nodes[p].target[1]));
             let mut x = px + l.location.x;
@@ -84,12 +98,7 @@ impl<S: 'static> Measurement<'_, S> {
                 nodes[i].local.y = y - py;
             }
             nodes[i].target = [x, y, x + l.size.width, y + l.size.height];
-            nodes[i].inset = [
-                l.padding.left + l.border.left,
-                l.padding.top + l.border.top,
-                l.padding.right + l.border.right,
-                l.padding.bottom + l.border.bottom,
-            ];
+            nodes[i].inset = inset;
         }
     }
 

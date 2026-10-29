@@ -3,8 +3,9 @@
 //!
 //! Off macOS every helper is a no-op: `remember_frame` returns true (so a `poll` that waits on it
 //! stops), `saved_size` returns `None`, `is_full_screen` returns false, and `toggle_full_screen`,
-//! `launch` and `busy` do nothing.
+//! `launch` and `busy` do nothing. `notify` posts nothing and reports `available() == false`.
 
+pub mod notify;
 mod quiet;
 pub use quiet::launch;
 

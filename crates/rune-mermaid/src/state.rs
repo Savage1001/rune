@@ -1,15 +1,12 @@
-//! State diagrams (`stateDiagram` and `stateDiagram-v2`), laid out on [`super::layered`].
+//! State diagrams (`stateDiagram` and `stateDiagram-v2`), laid out on [`super::layered_draw`].
 
 use std::collections::HashMap;
 
-use rune::{Align, TextStyle};
-
-use super::flowchart::{Dir, Edge, Head, Line, NodeShape};
-use super::flowchart_draw::{boundary, connector, node_size, outline, self_loop};
-use super::layered::{GCluster, GEdge, Graph, Spacing, layout};
+use super::canvas::{Measured, Scene, measure};
+use super::layered::Spacing;
+use super::layered_draw::{ClusterSpec, Dir, DrawNode, Edge, Head, Line, NodeShape, draw_layered, node_size};
 use super::{
-    Canvas, DiagramStyle, MAX_ITEMS, Measured, NodeStyle, Scene, clean_quoted, ellipse, fit,
-    measure, parse_style_props, room, rounded_rect, statements,
+    DiagramStyle, EdgeStyle, MAX_ITEMS, NodeStyle, clean_quoted, parse_style_props, statements,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +37,7 @@ pub(crate) struct Composite {
 
 #[derive(Debug)]
 pub(crate) struct StateDiagram {
+    pub title: Option<String>,
     pub dir: Dir,
     pub states: Vec<StateNode>,
     pub edges: Vec<Edge>,
@@ -50,7 +48,7 @@ const MAX_DEPTH: usize = 8;
 
 pub(crate) fn parse(header: &str, body: &[&str]) -> Option<StateDiagram> {
     let mut p = Parser {
-        d: StateDiagram { dir: Dir::Down, states: Vec::new(), edges: Vec::new(), composites: Vec::new() },
+        d: StateDiagram { title: None, dir: Dir::Down, states: Vec::new(), edges: Vec::new(), composites: Vec::new() },
         ids: HashMap::new(),
         composite_ids: HashMap::new(),
         stack: Vec::new(),
@@ -114,11 +112,16 @@ impl Parser {
             return Some(());
         }
         if s == "--" {
-            // Concurrent region divider inside a composite state.
             return (!self.stack.is_empty()).then_some(());
         }
         let word = s.split(|c: char| c.is_whitespace() || c == ':').next().unwrap_or("");
         match word {
+            "title" => {
+                let t = clean_quoted(s["title".len()..].trim());
+                if !t.is_empty() {
+                    self.d.title = Some(t);
+                }
+            }
             "direction" => {
                 let rest = s["direction".len()..].trim();
                 let dir = Dir::parse(rest)?;
@@ -235,7 +238,16 @@ impl Parser {
         let from = self.endpoint(left_raw, true)?;
         let to = self.endpoint(right_raw, false)?;
         self.budget()?;
-        self.d.edges.push(Edge { from, to, label, line: Line::Solid, start: Head::None, end: Head::Arrow, minlen: 1 });
+        self.d.edges.push(Edge {
+            from,
+            to,
+            label,
+            line: Line::Solid,
+            start: Head::None,
+            end: Head::Arrow,
+            minlen: 1,
+            style: EdgeStyle::default(),
+        });
         Some(())
     }
 
@@ -281,11 +293,10 @@ impl Parser {
         if !valid_state_id(&id) {
             return None;
         }
-        if let Some(&cid) = self.composite_ids.get(&id) {
-            // Edges to a composite state route to its first member when it has one, else a node for it.
-            if let Some(member) = self.d.states.iter().position(|st| st.cluster == Some(cid)) {
-                return Some(member);
-            }
+        if let Some(&cid) = self.composite_ids.get(&id)
+            && let Some(member) = self.d.states.iter().position(|st| st.cluster == Some(cid))
+        {
+            return Some(member);
         }
         self.ensure_state(&id)
     }
@@ -319,149 +330,30 @@ fn valid_state_id(s: &str) -> bool {
 
 const SPACING: Spacing = Spacing { node: 34.0, rank: 42.0, cluster: 14.0 };
 
-struct SizedState {
-    label: Measured,
-    shape: NodeShape,
-    size: [f32; 2],
-}
-
 pub(crate) fn draw(d: &StateDiagram, paint: &DiagramStyle) -> Option<Scene> {
-    let nodes: Vec<SizedState> = d
+    let nodes: Vec<DrawNode> = d
         .states
         .iter()
         .map(|s| match s.kind {
-            StateKind::Start => SizedState { label: Measured { text: String::new(), size: [0.0, 0.0], wrap: false }, shape: NodeShape::Circle, size: [18.0, 18.0] },
-            StateKind::End => SizedState { label: Measured { text: String::new(), size: [0.0, 0.0], wrap: false }, shape: NodeShape::Circle, size: [22.0, 22.0] },
-            StateKind::Choice => SizedState { label: Measured { text: String::new(), size: [0.0, 0.0], wrap: false }, shape: NodeShape::Diamond, size: [28.0, 28.0] },
-            StateKind::Bar => SizedState { label: Measured { text: String::new(), size: [0.0, 0.0], wrap: false }, shape: NodeShape::Rect, size: [64.0, 8.0] },
+            StateKind::Start => DrawNode::Start { cluster: s.cluster },
+            StateKind::End => DrawNode::End { cluster: s.cluster },
+            StateKind::Bar => DrawNode::Bar { cluster: s.cluster },
+            StateKind::Choice => DrawNode::Shape {
+                shape: NodeShape::Diamond,
+                label: Measured::default(),
+                size: [28.0, 28.0],
+                cluster: s.cluster,
+                style: s.style,
+            },
             StateKind::Normal => {
                 let full = if s.desc.is_empty() { s.label.clone() } else { format!("{}\n{}", s.label, s.desc.join("\n")) };
                 let label = measure(&full, paint.font);
-                SizedState { size: node_size(NodeShape::Round, label.size), shape: NodeShape::Round, label }
+                DrawNode::Shape { shape: NodeShape::Round, size: node_size(NodeShape::Round, label.size), label, cluster: s.cluster, style: s.style }
             }
         })
         .collect();
-    let edge_font = TextStyle { size: paint.font.size - 1.0, line_height: paint.font.line_height - 2.0, ..paint.font };
-    let labels: Vec<Option<Measured>> = d.edges.iter().map(|e| e.label.as_ref().map(|l| measure(l, edge_font))).collect();
-    let title_font = TextStyle { weight: 600.0, ..edge_font };
-    let titles: Vec<Measured> = d.composites.iter().map(|c| measure(&c.title, title_font)).collect();
-    let mut canvas = draw_in(d, d.dir, &nodes, &labels, &titles, edge_font, title_font, paint)?;
-    if canvas.width() > room(paint) && matches!(d.dir, Dir::Right | Dir::Left) {
-        let down = draw_in(d, if d.dir == Dir::Right { Dir::Down } else { Dir::Up }, &nodes, &labels, &titles, edge_font, title_font, paint)?;
-        if down.width() < canvas.width() {
-            canvas = down;
-        }
-    }
-    let scale = fit(canvas.width(), paint);
-    canvas.finish(scale)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_in(
-    d: &StateDiagram,
-    dir: Dir,
-    nodes: &[SizedState],
-    labels: &[Option<Measured>],
-    titles: &[Measured],
-    edge_font: TextStyle,
-    title_font: TextStyle,
-    paint: &DiagramStyle,
-) -> Option<Canvas> {
-    let across = matches!(dir, Dir::Right | Dir::Left);
-    let ax = |s: [f32; 2]| if across { [s[1], s[0]] } else { s };
-    let flip = matches!(dir, Dir::Up | Dir::Left);
-    let label_box = |m: &Measured| [m.size[0] + 10.0, m.size[1] + 4.0];
-    let graph = Graph {
-        sizes: nodes.iter().map(|n| ax(n.size)).collect(),
-        edges: d
-            .edges
-            .iter()
-            .zip(labels)
-            .map(|(e, l)| {
-                let (from, to) = if flip { (e.to, e.from) } else { (e.from, e.to) };
-                GEdge { from, to, label: l.as_ref().map(|m| ax(label_box(m))), minlen: e.minlen }
-            })
-            .collect(),
-        node_cluster: d.states.iter().map(|s| s.cluster).collect(),
-        clusters: d
-            .composites
-            .iter()
-            .zip(titles)
-            .map(|(c, t)| {
-                let lead = if t.text.is_empty() { 0.0 } else { t.size[1] + 10.0 };
-                GCluster { parent: c.parent, lead: if across { [lead, 0.0] } else { [0.0, lead] } }
-            })
-            .collect(),
-    };
-    let placed = layout(&graph, &SPACING)?;
-    let pt = |p: [f32; 2]| if across { [p[1], p[0]] } else { p };
-    let mut c = Canvas::default();
-
-    let depth = |mut i: usize| {
-        let mut dep = 0;
-        while let Some(p) = d.composites[i].parent {
-            i = p;
-            dep += 1;
-            if dep > d.composites.len() {
-                break;
-            }
-        }
-        dep
-    };
-    let mut order: Vec<usize> = (0..d.composites.len()).collect();
-    order.sort_by_key(|&i| depth(i));
-    for i in order {
-        let b = placed.clusters[i];
-        if b == [0.0; 4] {
-            continue;
-        }
-        let (p0, p1) = (pt([b[0], b[1]]), pt([b[2], b[3]]));
-        c.shape(rounded_rect(p0[0], p0[1], p1[0], p1[1], 8.0), paint.cluster_fill, paint.node_border, 1.0);
-        c.label_at(&titles[i], [p0[0] + 10.0, p0[1] + 7.0], title_font, paint.muted, Align::Start);
-    }
-
-    let centers: Vec<[f32; 2]> = placed.centers.iter().map(|&p| pt(p)).collect();
-    for (i, e) in d.edges.iter().enumerate() {
-        let mut path: Vec<[f32; 2]> = placed.paths[i].iter().map(|&p| pt(p)).collect();
-        if flip {
-            path.reverse();
-        }
-        let (from, to) = (e.from, e.to);
-        let mid = if path.len() <= 1 {
-            let s = labels[i].as_ref().map_or(0.0, |m| label_box(m)[0]);
-            self_loop(&mut c, e, centers[from], nodes[from].size, paint).map(|at| [at[0] + s / 2.0, at[1]])
-        } else {
-            let n = path.len();
-            path[0] = boundary(nodes[from].shape, centers[from], nodes[from].size, path[1]);
-            path[n - 1] = boundary(nodes[to].shape, centers[to], nodes[to].size, path[n - 2]);
-            connector(&mut c, &mut path, e, paint);
-            placed.labels[i].map(pt)
-        };
-        if let (Some(m), Some(at)) = (&labels[i], mid) {
-            let s = label_box(m);
-            c.fill(rounded_rect(at[0] - s[0] / 2.0, at[1] - s[1] / 2.0, at[0] + s[0] / 2.0, at[1] + s[1] / 2.0, 3.0), paint.surface);
-            c.label(m, at, edge_font, paint.text, Align::Center);
-        }
-    }
-
-    for (i, s) in d.states.iter().enumerate() {
-        let (ctr, size) = (centers[i], nodes[i].size);
-        match s.kind {
-            StateKind::Start => c.fill(ellipse(ctr, 8.0, 8.0), paint.line),
-            StateKind::End => {
-                c.shape(ellipse(ctr, 10.0, 10.0), paint.node_fill, paint.line, 1.5);
-                c.fill(ellipse(ctr, 5.5, 5.5), paint.line);
-            }
-            StateKind::Choice => c.shape(outline(NodeShape::Diamond, ctr, size), paint.node_fill, paint.node_border, 1.0),
-            StateKind::Bar => c.fill(rounded_rect(ctr[0] - size[0] / 2.0, ctr[1] - size[1] / 2.0, ctr[0] + size[0] / 2.0, ctr[1] + size[1] / 2.0, 2.0), paint.line),
-            StateKind::Normal => {
-                let (fill, border, text_color) = s.style.resolve(paint);
-                c.shape(outline(NodeShape::Round, ctr, size), fill, border, 1.0);
-                c.label(&nodes[i].label, ctr, paint.font, text_color, Align::Center);
-            }
-        }
-    }
-    Some(c)
+    let clusters: Vec<ClusterSpec> = d.composites.iter().map(|c| ClusterSpec { title: c.title.clone(), parent: c.parent }).collect();
+    draw_layered(d.dir, &nodes, &d.edges, &clusters, &SPACING, paint)
 }
 
 #[cfg(test)]

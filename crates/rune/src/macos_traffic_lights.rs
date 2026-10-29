@@ -67,7 +67,9 @@ fn place_in(win: &NSWindow, (x, y): (f64, f64)) {
 
 /// Runs AppKit's `-layout` for the view's real class, then puts the buttons back.
 unsafe extern "C" fn layout(view: &NSView, _: Sel) {
-    let base = view.class().superclass().expect("Rune traffic-light view has a superclass");
+    // Not `view.class()`'s superclass: entering full screen, AppKit observes the container and
+    // KVO puts its own subclass above Rune's, whose superclass is Rune's again.
+    let base = held_class(view).and_then(AnyClass::superclass).expect("Rune traffic-light view has a superclass");
     // SAFETY: `base` is the class this instance had before `hold`, which implements -layout.
     let _: () = unsafe { msg_send![super(view, base), layout] };
     if PLACING.with(Cell::get) {
@@ -80,10 +82,10 @@ unsafe extern "C" fn layout(view: &NSView, _: Sel) {
 
 /// Gives this one view a subclass of its own class whose `-layout` places the buttons again.
 unsafe fn hold(view: &NSView) {
-    let base = view.class();
-    if base.name().starts_with("RuneTrafficLights_") {
+    if held_class(view).is_some() {
         return;
     }
+    let base = view.class();
     let name = format!("RuneTrafficLights_{}", base.name());
     let class = match ClassBuilder::new(&name, base) {
         Some(mut builder) => {
@@ -96,4 +98,9 @@ unsafe fn hold(view: &NSView) {
     // SAFETY: a live view on the main thread. Only its isa changes, to a subclass without
     // ivars; the original class is never modified.
     unsafe { AnyObject::set_class(view, class) };
+}
+
+/// The subclass `hold` gave this view, wherever it sits in the view's class chain.
+fn held_class(view: &NSView) -> Option<&'static AnyClass> {
+    std::iter::successors(Some(view.class()), |c| c.superclass()).find(|c| c.name().starts_with("RuneTrafficLights_"))
 }

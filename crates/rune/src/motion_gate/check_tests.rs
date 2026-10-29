@@ -149,3 +149,17 @@ fn a_flight_that_lands_under_a_clip_lands_unseen() {
     assert_eq!(landed(true, true), ["lands-unseen"]);
     assert!(landed(true, false).is_empty(), "a still element a clip covers didn't fly there");
 }
+
+#[test]
+fn where_counts_roll_a_ticking_count_is_a_text_swap_but_a_rolling_label_is_not() {
+    let still: Vec<(usize, [f32; 4], f32)> = (0..60).map(|k| (k, [0.0, 0.0, 100.0, 20.0], 1.0)).collect();
+    let mut r = rec(vec![("count", still.clone())], 60);
+    r.tracks[0].words = vec![(0, "9s".into()), (30, "10s".into())];
+    assert!(kinds(&r).is_empty());
+    r.counts_roll = true;
+    assert_eq!(kinds(&r), ["text-swap"], "a clock that snaps instead of rolling");
+    // The label over its rolling glyphs reads "9s" then "10s" as its digits roll.
+    let glyph = r.track("count/digit-1", Some(0));
+    r.tracks[glyph].frames = (0..60).map(|k| (k, Snap { rect: [0.0, 0.0, 8.0, 20.0], vis: [0.0, 0.0, 8.0, 20.0], op: 1.0, scale: 1.0, flags: INK, phase: f32::NAN })).collect();
+    assert!(kinds(&r).is_empty());
+}

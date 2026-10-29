@@ -123,6 +123,9 @@ pub struct Recording {
     pub awake: Vec<bool>,
     /// The frame the cell's motion ended on (see `wakes-after-end`).
     pub quiet_from: Option<usize>,
+    /// The app rolls its live numbers, so a count or a clock ticking in place ("9s" → "10s") is
+    /// a `text-swap` too. By default a tick passes.
+    pub counts_roll: bool,
 }
 
 impl Recording {
@@ -525,11 +528,11 @@ pub fn check(rec: &Recording) -> Vec<Finding> {
         }
         // Words that change in place instead of rolling or crossfading. Words that grow or
         // shrink from the same start (streaming, a reveal) aren't a swap, nor is a count or a
-        // clock ticking ("1s" → "2s", "54.4K" → "64.6K").
+        // clock ticking ("1s" → "2s", "54.4K" → "64.6K") unless the app rolls its numbers.
         for w in t.words.windows(2) {
             let ((_, old), (k, new)) = (&w[0], &w[1]);
             let (Some(a), Some(b)) = (t.at(k.wrapping_sub(1)), t.at(*k)) else { continue };
-            if *k <= rec.start || parents.contains(&i) || new.starts_with(old.as_str()) || old.starts_with(new.as_str()) || ticks(old, new) { continue; }
+            if *k <= rec.start || parents.contains(&i) || new.starts_with(old.as_str()) || old.starts_with(new.as_str()) || !rec.counts_roll && ticks(old, new) { continue; }
             if (a.flags | b.flags) & (LIVE | LOOP | EXITING | VIRTUAL) != 0 || a.op.min(b.op) < rule("text-swap") || !seen(b, size) { continue; }
             geo.push((i, Finding { kind: "text-swap", element: short(&t.path), frame: *k, detail: format!("\"{old}\" → \"{new}\" in one frame") }));
         }

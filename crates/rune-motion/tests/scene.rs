@@ -368,6 +368,27 @@ fn a_child_mounted_after_its_parent_visibly_arrives_enters_on_its_own() {
 }
 
 #[test]
+fn a_child_mounted_late_in_its_parents_entrance_enters_on_its_own() {
+    let mut s = Scene::new();
+    let (p, c) = (NodeId(44), NodeId(45));
+    s.insert(NodeId(1), spec(0.0, 0.0, 1.0, 1.0), Mount::Initial);
+    s.frame_at(0.0);
+    s.insert(p, spec(0.0, 0.0, 100.0, 100.0), Mount::Animated);
+    let mut t = 0.0;
+    loop {
+        t += 1.0 / HZ;
+        let out = s.frame_at(t);
+        if find(out.changed, p).is_some_and(|pp| pp.opacity >= 0.9) { break; }
+        assert!(t < 2.0, "the parent arrives");
+    }
+    s.set_time(t + 1.0 / HZ);
+    s.insert(c, spec(10.0, 10.0, 20.0, 20.0).parent(p), Mount::Animated);
+    let cp = find(s.frame().changed, c).unwrap();
+    assert_eq!(cp.phase, Phase::Entering, "fades in instead of appearing at the parent's 90%");
+    assert!(cp.opacity < 0.5, "{}", cp.opacity);
+}
+
+#[test]
 fn flags_mark_intent_for_motion_lint() {
     let mut s = Scene::new();
     let id = NodeId(50);

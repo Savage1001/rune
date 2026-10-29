@@ -487,11 +487,12 @@ impl Scene {
             Some(p) => self.slot(p).unwrap_or_else(|| panic!("insert {id:?}: parent {p:?} isn't in the scene")) as u32,
             None => NONE,
         };
-        // A parent's presence tail runs on for ~0.7 s after it has visibly arrived; a child
-        // mounted in that tail enters on its own instead of popping in on the finished entrance.
+        // A child rides a parent that is still mostly to come. Past half its entrance (and in
+        // the ~0.7 s presence tail after it has visibly arrived), riding would show the child at
+        // once at most of its opacity, so it enters on its own instead of popping in.
         let rides_parent = parent != NONE && match self.nodes[parent as usize].phase {
             Phase::Present => false,
-            Phase::Entering => self.presence_now(parent as usize) < 1.0 - 1.0 / 255.0,
+            Phase::Entering => self.presence_now(parent as usize) < 0.5,
             Phase::Exiting { .. } => true,
         };
         let animate = mount == Mount::Animated && !rides_parent;

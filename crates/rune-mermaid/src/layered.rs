@@ -1,19 +1,19 @@
-//! A small layered (Sugiyama) layout for flowcharts, top to bottom: cycles broken by reversing
-//! DFS back edges, longest-path ranks on a doubled scale (so edge labels get a rank of their
-//! own), long edges split by dummy nodes, barycentre ordering sweeps that keep subgraphs
-//! contiguous, and positions from alternating weighted isotonic regressions toward each node's
-//! neighbours. Other directions transpose or mirror the result.
+//! A small layered (Sugiyama) layout for flowcharts and state diagrams, top to bottom: cycles
+//! broken by reversing DFS back edges, longest-path ranks on a doubled scale (so edge labels
+//! get a rank of their own), long edges split by dummy nodes, barycentre ordering sweeps that
+//! keep subgraphs contiguous, and positions from alternating weighted isotonic regressions
+//! toward each node's neighbours. Other directions transpose or mirror the result.
 //!
 //! Sized for the diagrams agents write (tens of nodes): every step is at most quadratic in a
 //! layer's edges.
 
-/// What to lay out. Sizes are in the layout's own axes: `[along a layer, across layers]`.
 /// The most ranks one edge asks to span (`minlen`); longer links draw this long.
 pub const MAX_MINLEN: usize = 8;
 
 /// The most points long edges may add before a graph is left unlaid (see [`layout`]).
 const MAX_DUMMIES: usize = 3000;
 
+/// What to lay out. Sizes are in the layout's own axes: `[along a layer, across layers]`.
 pub struct Graph {
     pub sizes: Vec<[f32; 2]>,
     pub edges: Vec<GEdge>,
@@ -152,7 +152,6 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Option<Placed> {
             }
         }
     }
-    // Reversing back edges leaves no cycles; anything left over (never, defensively) goes last.
     for v in 0..n {
         if !topo.contains(&v) {
             topo.push(v);
@@ -172,10 +171,13 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Option<Placed> {
     }
 
     // 3. The layered graph: real nodes, then one dummy per rank an edge crosses.
-    let dummies: usize = live.iter().map(|&i| {
-        let (a, b) = ends(i);
-        rank[b].saturating_sub(rank[a] + 1)
-    }).sum();
+    let dummies: usize = live
+        .iter()
+        .map(|&i| {
+            let (a, b) = ends(i);
+            rank[b].saturating_sub(rank[a] + 1)
+        })
+        .sum();
     if dummies > MAX_DUMMIES {
         return None;
     }
@@ -345,8 +347,7 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Option<Placed> {
             last[c] = last[c].max(node.rank);
         }
     }
-    let heights: Vec<f32> =
-        layers.iter().map(|l| l.iter().map(|&v| nodes[v].size[1]).fold(0.0, f32::max)).collect();
+    let heights: Vec<f32> = layers.iter().map(|l| l.iter().map(|&v| nodes[v].size[1]).fold(0.0, f32::max)).collect();
     let mut y = vec![0.0f32; ranks];
     let mut at = 0.0;
     for r in 0..ranks {
@@ -396,9 +397,7 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Option<Placed> {
         boxes
     };
 
-    // 8. A cluster's box spans its widest layer, so siblings (and loose nodes beside them) that
-    // are apart within every layer can still overlap across layers. Push overlapping siblings
-    // apart, re-pack each layer, and repeat while anything moved.
+    // 8. Push overlapping sibling clusters and loose nodes apart across layers.
     let members: Vec<Vec<usize>> = (0..g.clusters.len()).map(|c| (0..nodes.len()).filter(|&v| node_chains[v].contains(&c)).collect()).collect();
     let pos = positions(&layers, nodes.len());
     #[derive(Clone, Copy)]
@@ -410,7 +409,6 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Option<Placed> {
         Item::Cluster(c) => members[c].as_slice(),
         Item::Node(v) => std::slice::from_ref(&layers[nodes[v].rank][pos[v]]),
     };
-    // Each cluster's first member on each rank, so comparing two items is linear in their size.
     let first_on_rank: Vec<std::collections::HashMap<usize, usize>> = members
         .iter()
         .map(|m| {
@@ -425,7 +423,6 @@ pub fn layout(g: &Graph, sp: &Spacing) -> Option<Placed> {
         Item::Cluster(c) => first_on_rank[c].get(&r).copied(),
         Item::Node(v) => (nodes[v].rank == r).then_some(v),
     };
-    // Whether `a` sits left of `b`: by their order in a layer they share, else by centre.
     let left_of = |a: Item, b: Item, ba: [f32; 4], bb: [f32; 4]| {
         for &u in item_nodes(a) {
             if let Some(w) = on_rank(b, nodes[u].rank) {
@@ -578,7 +575,6 @@ fn isotonic(want: &[f32], w: &[f32], sep: &[f32]) -> Vec<f32> {
         }
         offset.push(at);
     }
-    // Blocks of (weighted mean, total weight, count).
     let mut blocks: Vec<(f32, f32, usize)> = Vec::new();
     for i in 0..want.len() {
         let mut b = (want[i] - offset[i], w[i].max(1e-3), 1);
@@ -603,85 +599,5 @@ fn isotonic(want: &[f32], w: &[f32], sep: &[f32]) -> Vec<f32> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn graph(n: usize, edges: &[(usize, usize)]) -> Graph {
-        Graph {
-            sizes: vec![[60.0, 30.0]; n],
-            edges: edges.iter().map(|&(from, to)| GEdge { from, to, label: None, minlen: 1 }).collect(),
-            node_cluster: vec![None; n],
-            clusters: Vec::new(),
-        }
-    }
-    const SP: Spacing = Spacing { node: 30.0, rank: 40.0, cluster: 10.0 };
-
-    #[test]
-    fn a_chain_goes_down_in_a_straight_line() {
-        let p = layout(&graph(3, &[(0, 1), (1, 2)]), &SP).unwrap();
-        assert!(p.centers[0][1] < p.centers[1][1] && p.centers[1][1] < p.centers[2][1]);
-        assert!((p.centers[0][0] - p.centers[2][0]).abs() < 0.5, "{:?}", p.centers);
-        assert_eq!(p.centers[1][1] - p.centers[0][1], 30.0 + 40.0, "one rank is a node plus the rank gap");
-    }
-
-    #[test]
-    fn a_fork_spreads_children_without_overlap_and_centres_the_parent() {
-        let p = layout(&graph(3, &[(0, 1), (0, 2)]), &SP).unwrap();
-        let (a, b) = (p.centers[1], p.centers[2]);
-        assert_eq!(a[1], b[1]);
-        assert!((a[0] - b[0]).abs() >= 90.0 - 0.01, "{a:?} {b:?}");
-        assert!((p.centers[0][0] - (a[0] + b[0]) / 2.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn cycles_and_self_loops_lay_out() {
-        let p = layout(&graph(3, &[(0, 1), (1, 2), (2, 0), (1, 1)]), &SP).unwrap();
-        assert_eq!(p.paths.len(), 4);
-        let back = &p.paths[2];
-        assert_eq!(back.first(), Some(&p.centers[2]), "a reversed edge still runs from its source");
-        assert_eq!(back.last(), Some(&p.centers[0]));
-        assert!(p.centers.iter().all(|c| c[0].is_finite() && c[1].is_finite()));
-    }
-
-    #[test]
-    fn sibling_clusters_never_overlap_across_layers() {
-        // Client {UI → Cache}, Edge {LB → W1, W2}, UI → LB: the clusters share a layer.
-        let mut g = graph(7, &[(0, 1), (2, 3), (2, 4), (0, 2), (3, 5), (4, 5), (4, 6)]);
-        g.clusters = vec![GCluster { parent: None, lead: [0.0, 16.0] }, GCluster { parent: None, lead: [0.0, 16.0] }];
-        g.node_cluster = vec![Some(0), Some(0), Some(1), Some(1), Some(1), None, None];
-        let p = layout(&g, &SP).unwrap();
-        let (a, b) = (p.clusters[0], p.clusters[1]);
-        let apart = a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1];
-        assert!(apart, "{a:?} {b:?}");
-        for v in [5, 6] {
-            let c = p.centers[v];
-            for bx in [a, b] {
-                let inside = c[0] > bx[0] && c[0] < bx[2] && c[1] > bx[1] && c[1] < bx[3];
-                assert!(!inside, "node {v} at {c:?} inside {bx:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn isotonic_keeps_separation_and_hits_free_targets() {
-        assert_eq!(isotonic(&[0.0, 100.0], &[1.0, 1.0], &[10.0]), vec![0.0, 100.0]);
-        let x = isotonic(&[50.0, 50.0], &[1.0, 1.0], &[20.0]);
-        assert_eq!(x, vec![40.0, 60.0]);
-    }
-
-    #[test]
-    fn clusters_stay_contiguous_and_contain_their_members() {
-        let mut g = graph(4, &[(0, 1), (0, 2), (0, 3)]);
-        g.clusters.push(GCluster { parent: None, lead: [0.0, 16.0] });
-        g.node_cluster[1] = Some(0);
-        g.node_cluster[3] = Some(0);
-        let p = layout(&g, &SP).unwrap();
-        let b = p.clusters[0];
-        for v in [1, 3] {
-            let c = p.centers[v];
-            assert!(c[0] - 30.0 >= b[0] && c[0] + 30.0 <= b[2] && c[1] - 15.0 >= b[1] + 16.0, "{c:?} in {b:?}");
-        }
-        let c2 = p.centers[2];
-        assert!(c2[0] + 30.0 <= b[0] || c2[0] - 30.0 >= b[2], "a non-member sits outside: {c2:?} {b:?}");
-    }
-}
+#[path = "layered_tests.rs"]
+mod tests;

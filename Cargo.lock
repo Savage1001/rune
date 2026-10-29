@@ -2956,6 +2956,7 @@ dependencies = [
  "pulldown-cmark",
  "resvg",
  "rune",
+ "rune-mermaid",
  "rune-motion",
  "rune-theme-opencode",
  "unicode-segmentation",
@@ -2987,6 +2988,13 @@ version = "0.0.1"
 dependencies = [
  "block2 0.5.1",
  "objc2 0.5.3",
+]
+
+[[package]]
+name = "rune-mermaid"
+version = "0.0.1"
+dependencies = [
+ "rune",
 ]
 
 [[package]]

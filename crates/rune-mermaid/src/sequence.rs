@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use rune::{Align, TextStyle};
 
-use super::{Canvas, DiagramPaint, MAX_ITEMS, Measured, Scene, arrowhead, clean, ellipse, fit, measure, rounded_rect};
+use super::{Canvas, DiagramStyle, MAX_ITEMS, Measured, Scene, arrowhead, clean, clean_quoted, ellipse, fit, measure, rounded_rect};
 
 #[derive(Debug)]
 pub(crate) struct Participant {
@@ -148,8 +148,8 @@ impl Parser {
             return None;
         }
         let (id, label) = match rest.split_once(" as ") {
-            Some((id, label)) => (id.trim(), clean(label)),
-            None => (rest.trim(), clean(rest)),
+            Some((id, label)) => (id.trim(), clean_quoted(label)),
+            None => (rest.trim(), clean_quoted(rest)),
         };
         let i = self.id(id)?;
         let p = &mut self.s.participants[i];
@@ -159,7 +159,7 @@ impl Parser {
     }
 
     fn id(&mut self, name: &str) -> Option<usize> {
-        let name = name.trim();
+        let name = name.trim().trim_matches('"');
         if name.is_empty() || name.contains([':', ',']) {
             return None;
         }
@@ -194,7 +194,7 @@ impl Parser {
         } else {
             return None;
         };
-        self.s.events.push(Event::Note(pos, clean(text)));
+        self.s.events.push(Event::Note(pos, clean_quoted(text)));
         Some(())
     }
 
@@ -230,7 +230,7 @@ struct Frame {
     x: [f32; 2],
 }
 
-pub(crate) fn draw(s: &Sequence, paint: &DiagramPaint) -> Option<Scene> {
+pub(crate) fn draw(s: &Sequence, paint: &DiagramStyle) -> Option<Scene> {
     let font = paint.font;
     let small = TextStyle { size: font.size - 1.0, line_height: font.line_height - 2.0, ..font };
     let bold = TextStyle { weight: 600.0, ..small };
@@ -444,7 +444,7 @@ fn tip_len(t: Tip) -> f32 {
     }
 }
 
-fn stroke(c: &mut Canvas, pts: Vec<[f32; 2]>, dotted: bool, paint: &DiagramPaint) {
+fn stroke(c: &mut Canvas, pts: Vec<[f32; 2]>, dotted: bool, paint: &DiagramStyle) {
     if dotted {
         c.dashed(&pts, 1.25, paint.line, 4.0, 3.0);
     } else {
@@ -452,7 +452,7 @@ fn stroke(c: &mut Canvas, pts: Vec<[f32; 2]>, dotted: bool, paint: &DiagramPaint
     }
 }
 
-fn tip(c: &mut Canvas, t: Tip, at: [f32; 2], d: [f32; 2], paint: &DiagramPaint) {
+fn tip(c: &mut Canvas, t: Tip, at: [f32; 2], d: [f32; 2], paint: &DiagramStyle) {
     let back = |by: f32, side: f32| [at[0] - d[0] * by - d[1] * side, at[1] - d[1] * by + d[0] * side];
     match t {
         Tip::None => {}
@@ -466,7 +466,7 @@ fn tip(c: &mut Canvas, t: Tip, at: [f32; 2], d: [f32; 2], paint: &DiagramPaint) 
 }
 
 /// A stick figure 36 points tall with its head's top at `top`.
-fn actor(c: &mut Canvas, top: [f32; 2], paint: &DiagramPaint) {
+fn actor(c: &mut Canvas, top: [f32; 2], paint: &DiagramStyle) {
     let [x, y] = top;
     c.shape(ellipse([x, y + 7.0], 7.0, 7.0), paint.node_fill, paint.line, 1.25);
     c.stroke(vec![[x, y + 14.0], [x, y + 26.0]], false, 1.25, paint.line);
@@ -475,82 +475,5 @@ fn actor(c: &mut Canvas, top: [f32; 2], paint: &DiagramPaint) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn seq(src: &str) -> Sequence {
-        match super::super::parse(src) {
-            Some(super::super::Diagram::Sequence(s)) => s,
-            _ => panic!("not a sequence diagram: {src:?}"),
-        }
-    }
-
-    #[test]
-    fn participants_messages_and_activation() {
-        let s = seq(
-            "sequenceDiagram\n  autonumber\n  actor U as User\n  participant A as API server\n  U->>+A: GET /items\n  A-->>-U: 200 OK\n  A->B: plain\n  B-->A: dotted\n  A-xB: lost\n  B--)A: async\n  A<<->>B: both\n  A->>A: think",
-        );
-        assert!(s.autonumber);
-        let names: Vec<(&str, &str, bool)> = s.participants.iter().map(|p| (p.id.as_str(), p.label.as_str(), p.actor)).collect();
-        assert_eq!(names, [("U", "User", true), ("A", "API server", false), ("B", "B", false)]);
-        let msgs: Vec<&Message> = s.events.iter().filter_map(|e| if let Event::Message(m) = e { Some(m) } else { None }).collect();
-        assert_eq!((msgs[0].from, msgs[0].to, msgs[0].text.as_str(), msgs[0].activate), (0, 1, "GET /items", true));
-        assert_eq!((msgs[1].dotted, msgs[1].tip, msgs[1].deactivate), (true, Tip::Filled, true));
-        assert_eq!((msgs[2].dotted, msgs[2].tip), (false, Tip::None));
-        assert_eq!((msgs[3].dotted, msgs[3].tip), (true, Tip::None));
-        assert_eq!(msgs[4].tip, Tip::Cross);
-        assert_eq!((msgs[5].dotted, msgs[5].tip), (true, Tip::Open));
-        assert!(msgs[6].both);
-        assert_eq!((msgs[7].from, msgs[7].to), (1, 1));
-    }
-
-    #[test]
-    fn notes_frames_and_explicit_activation() {
-        let s = seq(
-            "sequenceDiagram\nparticipant web-app\nNote right of web-app: thinks\nnote over web-app,db: shared<br>two lines\nloop Every minute\n  web-app->>db: ping\nend\nalt ok\n  activate db\n  db-->>web-app: rows\n  deactivate db\nelse error\n  db-->>web-app: 500\nend\nrect rgb(0,0,0)\nopt maybe\nweb-app->db: x\nend\nend",
-        );
-        assert_eq!(s.participants[0].id, "web-app", "dashes in names");
-        assert!(matches!(s.events[0], Event::Note(NotePos::Right(0), ref t) if t == "thinks"));
-        assert!(matches!(s.events[1], Event::Note(NotePos::Over(0, 1), ref t) if t == "shared\ntwo lines"));
-        assert!(matches!(s.events[2], Event::Open(Some(ref k), ref l) if k == "loop" && l == "Every minute"));
-        assert!(s.events.iter().any(|e| matches!(e, Event::Else(l) if l == "error")));
-        assert!(s.events.iter().any(|e| matches!(e, Event::Activate(1))));
-        assert!(s.events.iter().any(|e| matches!(e, Event::Open(None, _))));
-        assert_eq!(s.events.iter().filter(|e| matches!(e, Event::End)).count(), 4);
-    }
-
-    #[test]
-    fn malformed_and_unsupported_input_is_rejected() {
-        for src in [
-            "sequenceDiagram",
-            "sequenceDiagram\nA something B",
-            "sequenceDiagram\n->>B: no sender",
-            "sequenceDiagram\nA->>: no receiver",
-            "sequenceDiagram\nend",
-            "sequenceDiagram\nelse x",
-            "sequenceDiagram\nNote sideways of A: x",
-            "sequenceDiagram\nNote over A no colon",
-            "sequenceDiagram\nparticipant A@{ \"type\": \"database\" }",
-        ] {
-            assert!(super::super::parse(src).is_none(), "{src:?}");
-        }
-    }
-
-    #[test]
-    fn every_prefix_draws_or_falls_back_without_panicking() {
-        let src = "sequenceDiagram\n  autonumber\n  actor U as User\n  U->>+A: hi\n  loop retry\n    A->>B: call\n    B--xA: fail\n  end\n  Note left of U: waits\n  A-->>-U: done";
-        let paint = crate::MarkdownStyle::neutral(true).diagram;
-        for (i, _) in src.char_indices() {
-            let _ = super::super::scene(&src[..i], &paint);
-        }
-        assert!(super::super::scene(src, &paint).is_some());
-    }
-
-    #[test]
-    fn long_messages_widen_their_gap() {
-        let paint = crate::MarkdownStyle::neutral(false).diagram;
-        let narrow = super::super::scene("sequenceDiagram\nA->>B: hi", &paint).unwrap();
-        let wide = super::super::scene("sequenceDiagram\nA->>B: a much longer message that needs room", &paint).unwrap();
-        assert!(wide.size[0] > narrow.size[0] + 100.0, "{:?} vs {:?}", wide.size, narrow.size);
-    }
-}
+#[path = "sequence_tests.rs"]
+mod tests;

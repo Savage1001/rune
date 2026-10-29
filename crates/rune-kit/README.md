@@ -294,11 +294,11 @@ source each time, and earlier blocks stay mounted.
   and file header lines. Set colours with `MarkdownStyle::diff` and `diff_hunk`. Line text
   keeps the body colour unless `diff_text(added, removed)` or `diff_text_tint(0.5)` (toward the
   theme's green and red) colours it.
-- **```` ```mermaid ````** (feature `mermaid`) draws flowcharts and sequence diagrams natively,
-  with no JS or webview, themed through `MarkdownStyle::diagram*`. Layout runs once per source
-  and is cached. Anything outside the supported subset (listed in `src/mermaid.rs`) shows as
-  its code block with a "Diagram not supported" hint. `rune_kit::mermaid::render(src, &style)`
-  draws one on its own.
+- **```` ```mermaid ````** (feature `mermaid`, backed by `rune-mermaid`) draws flowcharts,
+  sequence diagrams and state diagrams natively, with no JS or webview, themed through
+  `MarkdownStyle::diagram*`. Layout runs once per source and is cached. Anything outside the
+  supported subset (listed in `rune-mermaid`) shows as its code block with a
+  "Diagram not supported" hint. `rune_kit::mermaid::render(src, &style)` draws one on its own.
 - **`selectable(true)`** lets people select and copy the text as one selection: a drag runs from
   a paragraph through list items into a code block, Shift-click extends, Cmd+A selects the
   whole Markdown and Cmd+C copies the text as drawn, as a web browser does: a newline between

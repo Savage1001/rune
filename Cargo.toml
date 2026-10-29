@@ -11,6 +11,7 @@ members = [
     "crates/rune-register",
     "crates/rune-knobs",
     "crates/rune-mac",
+    "crates/rune-mermaid",
     "crates/rune-perf",
     "themes/opencode",
     "examples/hello",

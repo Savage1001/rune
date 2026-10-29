@@ -7,6 +7,7 @@
 //! Linux shows the icon only where a tray host runs (KDE, waybar, most bars; GNOME needs an
 //! extension). Without one, [`Tray::new`] still succeeds and the icon appears once a host
 //! starts. macOS isn't supported yet.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -18,9 +19,13 @@ mod native;
 
 /// The icon as straight (not premultiplied) RGBA rows, `width × height × 4` bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrayIcon { pub width: u32, pub height: u32, pub rgba: Vec<u8> }
+pub struct TrayIcon { pub(crate) width: u32, pub(crate) height: u32, pub(crate) rgba: Vec<u8> }
+impl TrayIcon {
+    pub fn rgba(width: u32, height: u32, pixels: Vec<u8>) -> Self { Self { width, height, rgba: pixels } }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrayItem {
     /// `id` comes back in [`TrayEvent::Menu`] when it's picked.
     Action { id: String, label: String, enabled: bool },
@@ -36,6 +41,7 @@ impl TrayItem {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrayEvent {
     /// The icon's primary click. `token` is the XDG activation token a Wayland tray host hands
     /// over with it, for showing a window with focus.
@@ -45,16 +51,25 @@ pub enum TrayEvent {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct TraySpec {
     /// A stable application id (Linux `Id`).
-    pub id: String,
-    pub title: String,
-    pub tooltip: String,
-    pub icon: TrayIcon,
-    pub menu: Vec<TrayItem>,
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) tooltip: String,
+    pub(crate) icon: TrayIcon,
+    pub(crate) menu: Vec<TrayItem>,
+}
+impl TraySpec {
+    pub fn new(id: impl Into<String>, title: impl Into<String>, icon: TrayIcon) -> Self {
+        Self { id: id.into(), title: title.into(), tooltip: String::new(), icon, menu: Vec::new() }
+    }
+    pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self { self.tooltip = tooltip.into(); self }
+    pub fn menu(mut self, menu: Vec<TrayItem>) -> Self { self.menu = menu; self }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TrayError { Unsupported, Backend(String) }
 impl std::fmt::Display for TrayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,6 +79,7 @@ impl std::fmt::Display for TrayError {
 impl std::error::Error for TrayError {}
 
 /// Runs on the tray's thread; keep it short and hand work to the app.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) type Handler = Arc<dyn Fn(TrayEvent) + Send + Sync>;
 
 pub struct Tray {
@@ -107,8 +123,7 @@ mod tests {
 
     #[test]
     fn a_short_icon_is_refused() {
-        let spec = TraySpec { id: "t".into(), title: "T".into(), tooltip: String::new(),
-            icon: TrayIcon { width: 2, height: 2, rgba: vec![0; 3] }, menu: Vec::new() };
+        let spec = TraySpec::new("t", "T", TrayIcon::rgba(2, 2, vec![0; 3]));
         assert!(matches!(Tray::new(spec, |_| {}), Err(TrayError::Backend(_))));
     }
 }
